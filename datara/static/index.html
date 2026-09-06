@@ -1,0 +1,31 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="theme-color" content="#175b4e"><title>Datara Profile Generator</title>
+  <link rel="icon" href="/static/favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="/static/style.css">
+  <script src="/static/app.js" defer></script>
+</head>
+<body>
+  <aside class="sidebar">
+    <a class="brand" href="/" aria-label="Datara 首页"><span class="brand-icon">d<span>·</span></span><span>datara<small>PROFILE GENERATOR</small></span></a>
+    <div class="workspace-label">本地工作空间</div>
+    <button class="nav-item active" data-action="home"><span>▦</span> 我的 Profiles</button>
+    <button class="nav-item" data-action="settings"><span>⚙</span> 模型设置</button>
+    <div class="sidebar-divider"></div>
+    <div class="workspace-label">快速开始</div>
+    <button class="nav-item" data-action="demo" data-kind="cheque">支票示例 <span class="arrow">↗</span></button>
+    <button class="nav-item" data-action="demo" data-kind="invoice">供应商发票示例 <span class="arrow">↗</span></button>
+    <div class="sidebar-footer"><span class="status-dot"></span> 本地运行 <span class="version">v0.1</span><p>定义一次，保持一致。</p></div>
+  </aside>
+  <div class="shell">
+    <header class="topbar"><div id="breadcrumb">工作空间 <span>/</span> 我的 Profiles</div><button class="connection-status" data-action="settings" id="connection-status">○ 配置视觉模型</button></header>
+    <main id="main"></main>
+  </div>
+  <div id="toast" role="status" aria-live="polite"></div>
+  <dialog id="modal"><div id="modal-body"></div></dialog>
+  <input id="sample-upload" type="file" accept="application/pdf,image/png,image/jpeg" hidden>
+  <input id="excel-upload" type="file" accept=".xlsx" hidden>
+</body>
+</html>

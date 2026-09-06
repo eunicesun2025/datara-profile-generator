@@ -1,0 +1,17 @@
+[project]
+name = "datara-profile-generator"
+version = "0.1.0"
+description = "Local Datara profile editor and deterministic artifact generator"
+requires-python = ">=3.11"
+dependencies = [
+  "fastapi>=0.115,<1", "uvicorn>=0.34,<1", "pydantic>=2.10,<3",
+  "python-multipart>=0.0.20,<1", "openpyxl>=3.1,<4",
+  "httpx>=0.28,<1", "pypdfium2>=4.30,<6", "pillow>=11,<13",
+]
+
+[dependency-groups]
+dev = ["pytest>=8,<10"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
