@@ -36,6 +36,9 @@ def test_repairs_require_opt_in_and_preserve_field_table():
     assert any(f.name == 'validity_check' for f in p.tables[0].fields)
     assert '导入修复记录' in p.description
     assert any('唯一主表' in n for n in notes)
+    assert next(f for f in p.tables[0].fields if f.name == 'date').reviewed
+    assert not next(f for f in p.tables[0].fields if f.name == 'validity_check').reviewed
+    assert not next(f for f in p.tables[1].fields if f.name == 'amount').reviewed
 
 
 def test_repairs_do_not_overwrite_explicit_wrong_parent():

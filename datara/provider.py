@@ -1,5 +1,6 @@
 import base64
 import json
+import ssl
 from pathlib import Path
 from urllib.parse import urlparse
 
@@ -47,7 +48,9 @@ async def completion(c: Connection, key: str, instructions: str, images: list[Pa
                                                {"role": "user", "content": content}],
                "max_tokens": c.max_tokens, "stream": False}
     try:
-        async with httpx.AsyncClient(timeout=httpx.Timeout(c.timeout, connect=15), follow_redirects=False, trust_env=False) as client:
+        # Preserve TLS verification; company CA bundles and proxies are configured
+        # in the launching terminal, never persisted with endpoint credentials.
+        async with httpx.AsyncClient(timeout=httpx.Timeout(c.timeout, connect=15), follow_redirects=False, trust_env=True) as client:
             response = await client.post(c.base_url.rstrip("/") + "/chat/completions", json=payload,
                                          headers={"Authorization": "Bearer " + key})
         if response.status_code == 401:
@@ -67,7 +70,18 @@ async def completion(c: Connection, key: str, instructions: str, images: list[Pa
     except httpx.TimeoutException as e:
         raise ValueError("模型请求超时，可调整超时设置后重试") from e
     except httpx.HTTPError as e:
+        cause = e
+        seen = set()
+        while cause is not None and id(cause) not in seen:
+            seen.add(id(cause))
+            if isinstance(cause, ssl.SSLCertVerificationError) or "CERTIFICATE_VERIFY_FAILED" in str(cause):
+                raise ValueError("TLS 证书验证失败：请向公司 IT 获取可信 CA 证书链（PEM），在启动终端设置 SSL_CERT_FILE 后重启。不要关闭证书验证。详见跨平台指南。") from e
+            cause = cause.__cause__ or cause.__context__
+        if isinstance(e, httpx.ProxyError):
+            raise ValueError("企业代理连接失败：请核对启动终端的 HTTPS_PROXY / HTTP_PROXY 与公司 IT 提供的代理配置") from e
         raise ValueError("无法连接模型端点，请检查网络和 API 地址") from e
+    except (OSError, ssl.SSLError) as e:
+        raise ValueError("无法加载 TLS 配置：请检查 SSL_CERT_FILE / SSL_CERT_DIR 是否存在且为有效的可信 CA 证书；修正后重启服务") from e
     except (KeyError, IndexError, json.JSONDecodeError) as e:
         raise ValueError("模型响应格式不兼容，期望 choices[0].message.content") from e
 

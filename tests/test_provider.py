@@ -3,6 +3,7 @@ import json
 import pytest
 import asyncio
 import httpx
+import ssl
 
 from datara.domain import new_profile
 from datara.provider import Connection, completion, parse_draft
@@ -51,3 +52,25 @@ def test_provider_errors_do_not_echo_sensitive_response(monkeypatch, status):
     with pytest.raises(ValueError, match=f"HTTP {status}") as error:
         asyncio.run(completion(Connection(base_url="https://vision.test/v1", model="test"), "private-key", "任务", []))
     assert "secret provider" not in str(error.value)
+
+
+def test_certificate_failure_is_actionable_and_private(monkeypatch):
+    real_client = httpx.AsyncClient
+    def handler(request):
+        try:
+            raise ssl.SSLCertVerificationError("CERTIFICATE_VERIFY_FAILED private detail")
+        except ssl.SSLCertVerificationError as cause:
+            raise httpx.ConnectError("private proxy detail") from cause
+    def client(**kwargs):
+        assert kwargs['trust_env'] is True
+        return real_client(transport=httpx.MockTransport(handler), **kwargs)
+    monkeypatch.setattr('datara.provider.httpx.AsyncClient', client)
+    with pytest.raises(ValueError, match='SSL_CERT_FILE') as error:
+        asyncio.run(completion(Connection(), 'private-key', '任务', []))
+    assert 'private' not in str(error.value)
+
+
+def test_invalid_ca_file_has_actionable_error(monkeypatch, tmp_path):
+    monkeypatch.setenv('SSL_CERT_FILE', str(tmp_path / 'missing.pem'))
+    with pytest.raises(ValueError, match='无法加载 TLS 配置'):
+        asyncio.run(completion(Connection(), 'private-key', '任务', []))

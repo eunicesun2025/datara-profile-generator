@@ -48,13 +48,13 @@ class ResultRequest(Model):
 def create_app(data_dir: Path | None = None):
     store = Store(data_dir or Path(os.environ.get("DATARA_DATA_DIR", "data")))
     settings_path = store.root / "connection.json"
-    connection = Connection.model_validate_json(settings_path.read_text()) if settings_path.exists() else Connection()
+    connection = Connection.model_validate_json(settings_path.read_text(encoding="utf-8")) if settings_path.exists() else Connection()
     jobs, tasks = {}, {}
 
     @asynccontextmanager
     async def lifespan(app):
         for path in (store.root / "tests").glob("*.json"):
-            record = json.loads(path.read_text())
+            record = json.loads(path.read_text(encoding="utf-8"))
             if record.get("status") == "running":
                 record.update(status="interrupted", error="应用重启，请重新发起请求")
                 store.write_json(path, record)
@@ -187,7 +187,7 @@ def create_app(data_dir: Path | None = None):
 
     def sample_meta(identity: str):
         folder = store.path("samples", identity, "")
-        return folder, json.loads((folder / "meta.json").read_text())
+        return folder, json.loads((folder / "meta.json").read_text(encoding="utf-8"))
 
     @app.get("/api/samples/{identity}")
     def sample(identity: str):
@@ -298,7 +298,7 @@ def create_app(data_dir: Path | None = None):
 
     @app.get("/api/jobs/{identity}")
     def get_job(identity: str):
-        return jobs.get(identity) or json.loads(store.path("tests", identity).read_text())
+        return jobs.get(identity) or json.loads(store.path("tests", identity).read_text(encoding="utf-8"))
 
     @app.post("/api/jobs/{identity}/cancel")
     async def cancel_job(identity: str):
@@ -310,7 +310,7 @@ def create_app(data_dir: Path | None = None):
     @app.get("/api/profiles/{identity}/tests")
     def tests(identity: str):
         store.path("profiles", identity)
-        records = [json.loads(p.read_text()) for p in (store.root / "tests").glob("*.json")]
+        records = [json.loads(p.read_text(encoding="utf-8")) for p in (store.root / "tests").glob("*.json")]
         return sorted([r for r in records if r["profile_id"] == identity], key=lambda r: r["started_at"], reverse=True)[:10]
 
     @app.post("/api/demo/{kind}")

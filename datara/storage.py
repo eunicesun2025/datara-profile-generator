@@ -36,12 +36,12 @@ class Store:
             temp.unlink(missing_ok=True)
 
     def load(self, identity: str) -> Profile:
-        return Profile.model_validate_json(self.path("profiles", identity).read_text())
+        return Profile.model_validate_json(self.path("profiles", identity).read_text(encoding="utf-8"))
 
     def list_profiles(self):
         result = []
         for path in (self.root / "profiles").glob("*.json"):
-            p = Profile.model_validate_json(path.read_text())
+            p = Profile.model_validate_json(path.read_text(encoding="utf-8"))
             result.append({"id": p.id, "name": p.name, "revision": p.revision, "updated_at": p.updated_at,
                            "table_count": len(p.tables), "field_count": sum(len(t.fields) for t in p.tables)})
         return sorted(result, key=lambda p: p["updated_at"] or "", reverse=True)

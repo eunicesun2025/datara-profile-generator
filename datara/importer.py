@@ -66,6 +66,7 @@ def parse_fields(content: bytes, sheet: str, columns: dict | None = None, repair
         p = Profile(name="导入的 Profile")
         tables, parents = {}, {}
         for line, values in enumerate(rows, 2):
+            row_repaired = False
             def get(column, default=None):
                 if column not in headers:
                     return default
@@ -89,6 +90,7 @@ def parse_fields(content: bytes, sheet: str, columns: dict | None = None, repair
                 if not repair_structure or (parent and parents[tname] and parents[tname] != parent):
                     raise ValueError(f"第 {line} 行：同一表的层级或父表不一致")
                 if tables[tname].role != role:
+                    row_repaired = True
                     notes.append(f"第 {line} 行 {name}：保留表名 {tname}，层级按该表首次出现的定义改为 {'1（主表）' if tables[tname].role == 'head' else '2（子表）'}；请审核字段归属")
                 if parent and not parents[tname]:
                     parents[tname] = parent
@@ -100,8 +102,8 @@ def parse_fields(content: bytes, sheet: str, columns: dict | None = None, repair
             source = str(get("Source", "") if full else get(columns.get("source"), ""))
             source_known = source.lower() in {"ai", "system", "manual"}
             source = {"ai": "AI", "system": "System", "manual": "Manual"}.get(source.lower(), "AI")
-            reviewed = full and recognized and source_known
-            if not reviewed:
+            reviewed = full and recognized and source_known and not row_repaired
+            if not (full and recognized and source_known):
                 notes.append(f"第 {line} 行 {name}：来源/类型请审核，未提供时暂以 AI / String 建议")
             if name in {"company_code", "current_date"} or (name == "item" and tname == "AI_Invoice_Detail"):
                 if source != "System":
@@ -131,6 +133,8 @@ def parse_fields(content: bytes, sheet: str, columns: dict | None = None, repair
                 if not parents[table.name] and repair_structure and len(heads) == 1:
                     parents[table.name] = heads[0].name
                     notes.append(f"{table.name}：空白 ForeignKeyField 补为唯一主表 {heads[0].name}（此列填写主表名）")
+                    for field in table.fields:
+                        field.reviewed = False
                 parent = tables.get(parents[table.name])
                 if parent is None or parent.role != "head":
                     raise ValueError(f"{table.name}：ForeignKeyField 应填写已存在的主表名称")
@@ -138,9 +142,6 @@ def parse_fields(content: bytes, sheet: str, columns: dict | None = None, repair
         p.tables = list(tables.values())
         if repair_structure and notes:
             p.description = ('导入修复记录（字段归属待审核）：\n' + '\n'.join(notes))[:2000]
-            for table in p.tables:
-                for field in table.fields:
-                    field.reviewed = False
         notes += normalize(p, repair_system=True)
         notes.append("FieldOrder 已按工作表行次序逐表连续编号；SQL 类型使用已确认默认值。请审核后保存。")
         return p, notes

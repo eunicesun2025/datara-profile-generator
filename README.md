@@ -2,6 +2,8 @@
 
 本地运行的 Datara Profile 编辑与生成工具。以统一字段定义为基准，生成 Field Mapping、SQL Server 建表脚本、中文提取提示词及 JSON 结构。
 
+Mac / Windows 和公司证书/代理配置请先阅读 [跨平台指南](docs/CROSS_PLATFORM.zh-CN.md)。Windows 可双击 `run.cmd`。
+
 第一次使用请阅读 [从 GitHub 到 VS Code 中文指南](docs/VS_CODE_GUIDE.zh-CN.md)。已有 Mapping 直接导入；没有 Mapping 才新建空白 Profile。生成 SQL、提示词和 ZIP 不需要 API Key。
 
 导入前显示结构检查与可选修复：同名表层级以首次定义为候选，子表空白父表只在唯一主表时补齐；字段归属仍需审核，原文件不修改。主表名称在创建时可填，之后通过“修改主表名称”编辑。编辑器提供返回列表按钮及浏览器前进/后退导航。
@@ -75,7 +77,7 @@ export DATARA_DATA_DIR='/your/private/data-directory'
 
 不要把真实密钥提交到 Git。`.env.example` 仅是环境变量说明，应用不会隐式读取 `.env` 文件。设置持久化文件只包含端点、模型及超时等非密钥配置。
 
-该版本请求不使用系统代理；需要通过企业代理连接的环境需增加明确的代理配置。模型的图片数量、容量与 token 限制由实际端点决定；应用另有 18MB 图片总量限制，会报错而非丢页。
+模型请求读取 HTTPS_PROXY / HTTP_PROXY / NO_PROXY 和 SSL_CERT_FILE / SSL_CERT_DIR，保持 TLS 验证；详见跨平台指南。模型的图片数量、容量与 token 限制由实际端点决定；应用另有 18MB 图片总量限制，会报错而非丢页。
 
 ## 本地数据
 
