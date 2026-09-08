@@ -16,11 +16,13 @@ from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 
 from .domain import (DEFAULT_SQL, SYSTEM, FieldDef, Model, Profile, TableDef, json_schema,
-                     new_profile, normalize, strict_json, uid, validate_profile, validate_result)
+                     new_profile, normalize, strict_json, uid, validate_profile, validate_result,
+                     infer_type, suggest_displays)
 from .generators import export_zip, fingerprint, preview, prompt
 from .importer import inspect_workbook, parse_fields
 from .media import render_pages
-from .provider import Connection, ConnectionUpdate, completion, draft_prompt, parse_draft, validate_connection
+from .provider import Connection, ConnectionUpdate, completion, draft_prompt, parse_analysis, validate_connection
+from .references import reference_text, MAX_TEXT
 from .storage import Conflict, Store
 
 STATIC = Path(__file__).parent / "static"
@@ -141,6 +143,20 @@ def create_app(data_dir: Path | None = None):
         notes = normalize(profile)
         return {"profile": profile.model_dump(), "notes": notes}
 
+    @app.post("/api/fields/suggest")
+    def suggest_fields(profile: Profile):
+        notes = normalize(profile)
+        for table in profile.tables:
+            for field in table.fields:
+                if field.source != "AI":
+                    continue
+                inferred = infer_type(field.name, field.description, field.data_type)
+                if inferred != field.data_type:
+                    notes.append(f"{table.name}.{field.name}：{field.data_type} → {inferred}")
+                    field.data_type, field.reviewed = inferred, False
+        suggest_displays(profile)
+        return {"profile": profile.model_dump(), "notes": notes}
+
     @app.post("/api/preview")
     def get_preview(profile: Profile):
         normalize(profile)
@@ -215,6 +231,31 @@ def create_app(data_dir: Path | None = None):
         profile, notes = parse_fields(store.path("imports", body.import_id, ".xlsx").read_bytes(), body.sheet, body.columns, body.repair_structure)
         return {"profile": profile.model_dump(), "notes": notes}
 
+    @app.post("/api/references")
+    async def upload_reference(file: UploadFile = File(...)):
+        content = await file.read(8 * 1024 * 1024 + 1)
+        if len(content) > 8 * 1024 * 1024:
+            raise ValueError("参考文件超过 8MB")
+        name = Path(file.filename or "reference.txt").name
+        text = await asyncio.to_thread(reference_text, content, name)
+        identity = uid()
+        record = {"id": identity, "name": name, "text": text, "characters": len(text)}
+        store.write_json(store.path("references", identity), record)
+        return {k: record[k] for k in ("id", "name", "characters")}
+
+    @app.get("/api/references/{identity}")
+    def reference_meta(identity: str):
+        record = json.loads(store.path("references", identity).read_text(encoding="utf-8"))
+        return {k: record[k] for k in ("id", "name", "characters")}
+
+    def analysis_references(profile: Profile):
+        records = [json.loads(store.path("references", identity).read_text(encoding="utf-8"))
+                   for identity in profile.reference_ids]
+        text = json.dumps([{"filename": r["name"], "content": r["text"]} for r in records], ensure_ascii=False) if records else ""
+        if len(text) > MAX_TEXT:
+            raise ValueError("本次参考资料合计超过 60,000 字符，请移除部分资料后重试")
+        return text
+
     def public_connection():
         return {**app.state.connection.model_dump(), "has_key": bool(app.state.api_key)}
 
@@ -245,10 +286,13 @@ def create_app(data_dir: Path | None = None):
             folder, meta = sample_meta(body.sample_id)
             images = [folder / f"{i}.jpg" for i in range(1, meta["pages"] + 1)]
             instructions = prompt(body.profile) if body.kind == "extract" else draft_prompt(body.profile, body.instructions)
-            raw = await completion(c, key, instructions, images)
+            if body.kind == "draft" and body.profile.reference_ids:
+                raw = await completion(c, key, instructions, images, reference_text=analysis_references(body.profile))
+            else:
+                raw = await completion(c, key, instructions, images)
             record["raw"] = raw
             if body.kind == "draft":
-                record["suggestions"] = parse_draft(raw, body.profile)
+                record.update(parse_analysis(raw, body.profile))
             else:
                 try:
                     value = strict_json(raw)
@@ -280,6 +324,8 @@ def create_app(data_dir: Path | None = None):
             if errors:
                 raise ValueError("；".join(errors))
         sample_meta(body.sample_id)
+        if body.kind == "draft":
+            analysis_references(body.profile)
         c = app.state.connection.model_copy(deep=True)
         key = app.state.api_key
         validate_connection(c)

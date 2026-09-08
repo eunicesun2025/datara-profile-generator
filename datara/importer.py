@@ -4,7 +4,7 @@ from datetime import date, datetime
 
 from openpyxl import load_workbook
 
-from .domain import FieldDef, Profile, TableDef, normalize
+from .domain import FieldDef, Profile, TableDef, normalize, snake_name, infer_type, suggest_displays
 
 
 def workbook(content: bytes):
@@ -105,7 +105,13 @@ def parse_fields(content: bytes, sheet: str, columns: dict | None = None, repair
             reviewed = full and recognized and source_known and not row_repaired
             if not (full and recognized and source_known):
                 notes.append(f"第 {line} 行 {name}：来源/类型请审核，未提供时暂以 AI / String 建议")
-            if name in {"company_code", "current_date"} or (name == "item" and tname == "AI_Invoice_Detail"):
+            canonical_name = snake_name(name)
+            description = str(get(columns.get("description"), "")) if not full else ""
+            inferred = infer_type(name, description, dtype)
+            if inferred != dtype:
+                notes.append(f"{tname}.{name}：根据字段含义建议类型 {inferred}，请审核")
+                dtype, reviewed = inferred, False
+            if canonical_name in {"company_code", "current_date"} or (canonical_name == "item" and tname == "AI_Invoice_Detail"):
                 if source != "System":
                     notes.append(f"{tname}.{name}：按确认规则改为 System，由 Datara 填充")
                 source = "System"
@@ -143,6 +149,7 @@ def parse_fields(content: bytes, sheet: str, columns: dict | None = None, repair
         if repair_structure and notes:
             p.description = ('导入修复记录（字段归属待审核）：\n' + '\n'.join(notes))[:2000]
         notes += normalize(p, repair_system=True)
+        suggest_displays(p)
         notes.append("FieldOrder 已按工作表行次序逐表连续编号；SQL 类型使用已确认默认值。请审核后保存。")
         return p, notes
     finally:

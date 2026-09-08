@@ -1,4 +1,4 @@
-:root{--bg:#f6f7f5;--paper:#fff;--ink:#21342e;--muted:#75817b;--line:#e3e8e3;--green:#175b4e;--green-light:#e9f2ed;--orange:#b8742e;--red:#b8433d;--shadow:0 8px 32px #243e3010;font-family:Inter,"PingFang SC","Microsoft YaHei",system-ui,sans-serif;color:var(--ink);font-size:14px}
+:root{--bg:#f3f6fb;--paper:#fff;--ink:#172b48;--muted:#62738c;--line:#dce4ef;--green:#183d70;--green-light:#eaf0fa;--orange:#a97726;--red:#b8433d;--shadow:0 8px 32px #102b5010;font-family:Inter,"PingFang SC","Microsoft YaHei",system-ui,sans-serif;color:var(--ink);font-size:14px}
 *{box-sizing:border-box}
 body{margin:0;background:var(--bg)}
 button,input,textarea,select{font:inherit}
@@ -164,6 +164,82 @@ summary{padding:9px 0}
 .w-full{width:100%}
 .no-margin{margin:0}
 .hidden{display:none!important}
+/* Datara navy workspace; the supplied brand image is displayed without altering it. */
+.sidebar{background:#0c203d;border-color:#172f50;color:#dbe5f5;padding-top:25px}
+.brand{display:flex;flex-direction:column;gap:6px;margin:0 0 34px;color:#dbe5f5;letter-spacing:0}
+.brand small{font-size:9px;letter-spacing:2.1px;color:#b0bdd6}
+.logo-window{position:relative;display:block;width:184px;height:48px;overflow:hidden;border-radius:7px;background:#020522}
+.logo-window img{position:absolute;width:230px;max-width:none;left:-22px;top:-98px}
+.workspace-label,.sidebar-footer,.sidebar-footer p,.version{color:#9cafce}
+.sidebar .nav-item{color:#c1cee2}
+.sidebar .nav-item.active{background:#1c3b63;color:white}
+.sidebar .nav-item:hover{background:#183454!important;color:white}
+.sidebar-divider{border-color:#294263}
+.status-dot{background:#7ba8f8}
+.topbar{background:#ffffffd9;color:#60738f}
+.hero{background:linear-gradient(115deg,#e8effa,#f7f9fe);border-color:#d5e0f1}
+.hero p,.flow-row,.empty h3{color:#465e7f}
+.flow-card,.flow-num,.outputs span{border-color:#d7e2f2;color:#56708f}
+.flow-num,.file-mark,.step b,.pill,.result-status{background:#edf2fa}
+.flow-arrow{color:#8ca1c0}
+button:hover:not(:disabled){background:#edf2fa}
+.primary:hover:not(:disabled){background:#102b50}
+.secondary{background:#e9effa;border-color:#d1def2}
+.profile-card:hover{border-color:#9bb1d3}
+.profile-card .card-bottom{border-color:#e8edf5;color:#6b7e97}
+.empty{border-color:#cbd7e8;color:#71829b}
+.sample-drop{background:#f7f9fd;border-color:#b6c8e0;padding:32px 12px}
+.sample-drop:hover,.sample-drop:focus{background:#eaf1fc}
+.sample-drop strong{line-height:1.7}
+.upload-icon{color:#537aaa}
+.sample-image{background:#f3f6fc;border-color:#dce5f0}
+.sample-caption,.sample-note,.helper,.form-label,.save-state,.count,.field-footer,.inline-note,.details-toggle,.suggestion p,.sample-drop p{color:#657892}
+.form-group input,.form-group textarea,.form-group select,.profile-meta input,.profile-meta textarea{border-color:#d4deed}
+input:focus,textarea:focus,select:focus{outline-color:#b4c9ea;border-color:#799dce}
+.table-tabs,.modal-footer{background:#f6f8fc}
+.table-tab{color:#60748f}.table-tab.active{border-color:#c9d7e9}
+.field-toolbar{flex-wrap:wrap;gap:12px}
+.field-toolbar select,.field-table select{border-color:#d7e1ee;color:#4e6481}
+th{background:#f5f8fc;border-color:#e1e8f2;color:#637894}
+td{border-color:#e9eef6}
+.field-table{min-width:790px}
+.field-table input:not([type=checkbox]){color:#284564}
+.field-table input:not(:disabled):hover{border-color:#c6d6ea}
+.field-table .desc{color:#70819b!important}
+.field-table .source-AI{color:#214d8a;background:#eaf1ff}
+.field-table input.display-order{min-width:65px;width:82px;font-family:inherit}
+.system-row{background:#f9fbfe}
+.icon-button,.drag,.table-tab small{color:#8194af}
+.pill{color:#44658d}
+.notice{background:#eef3fb;border-color:#d8e4f5;color:#3f5f88}
+.notice.error{background:#fdf2ef;border-color:#f0d7cf;color:#a24e43}
+.notice.warning{background:#fbf7eb;border-color:#efe7cb;color:#957941}
+.artifact-tabs .active{border-color:#c5d5ed}
+pre{background:#f7f9fd;color:#264364}
+#toast{background:#102b50}
+dialog{border-color:#d6dfed;box-shadow:0 20px 90px #0c203d33;width:min(780px,93vw)}
+dialog::backdrop{background:#0c203d66}
+.reference-file{display:flex;align-items:center;justify-content:space-between;gap:8px;padding:12px 0;border-bottom:1px solid var(--line);font-size:12px;overflow-wrap:anywhere}
+.reference-file small{display:block;color:var(--muted);margin-top:4px}
+.reference-drop{min-height:100px}
+[data-drop]{transition:background .15s,box-shadow .15s}
+[data-drop].drag-active{background:#dfebff;box-shadow:inset 0 0 0 2px #527fc0}
+.panel-head{gap:8px;flex-wrap:wrap}.panel-head h3{margin-right:auto}
+.panel-toggle{font-size:10px;color:#6a80a0;padding:4px}
+.is-collapsed>:not(.panel-head){display:none!important}
+.sample-column .collapse-samples{align-self:stretch;color:#526e96;background:#e9eff9}
+.samples-collapsed .editor-layout{grid-template-columns:52px minmax(0,1fr)}
+.samples-collapsed .sample-column>:not(.collapse-samples){display:none}
+.samples-collapsed .collapse-samples{writing-mode:vertical-rl;padding:16px 10px;align-self:center}
+.analysis-profile{margin-top:20px}.analysis-profile textarea{margin-top:8px;min-height:85px;line-height:1.8}
+.analysis-profile textarea[id=analysis-document_rules]{min-height:180px}
+.rule-text{white-space:pre-wrap}
+.suggestion{margin-top:12px}.suggestion .checkbox-label{flex-wrap:wrap}
+.sidebar-collapsed .sidebar{width:68px;padding:24px 9px}
+.sidebar-collapsed .shell{margin-left:68px}
+.sidebar-collapsed .sidebar .workspace-label,.sidebar-collapsed .sidebar .nav-item,.sidebar-collapsed .sidebar-divider,.sidebar-collapsed .sidebar-footer,.sidebar-collapsed .brand small{display:none}
+.sidebar-collapsed .logo-window{width:46px;height:24px}
+.sidebar-collapsed .logo-window img{width:60px;left:-6px;top:-22px}
 @media(min-width:1600px){.editor-layout{grid-template-columns:340px minmax(0,1fr)}
 }
 @media(max-width:1150px){.sidebar{width:185px;padding:30px 12px}
@@ -176,6 +252,7 @@ main{padding:28px 22px}
 .test-layout{grid-template-columns:240px 1fr}
 }
 @media(max-width:850px){.sidebar{width:68px;padding:23px 9px}
+.logo-window{width:46px;height:24px}.logo-window img{width:60px;left:-6px;top:-22px}.brand small{display:none}
 .brand{margin:0 auto 30px;justify-content:center}
 .brand>span:last-child,.workspace-label,.sidebar-divider,.sidebar-footer,.sidebar .nav-item{display:none}
 .shell{margin-left:68px}

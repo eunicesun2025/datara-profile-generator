@@ -4,9 +4,16 @@ import pytest
 import asyncio
 import httpx
 import ssl
+from pydantic import ValidationError
 
 from datara.domain import new_profile
 from datara.provider import Connection, completion, parse_draft
+
+
+def test_connection_allows_long_vision_timeout():
+    assert Connection(timeout=1800).timeout == 1800
+    with pytest.raises(ValidationError):
+        Connection(timeout=1801)
 
 
 def test_draft_is_additive_and_filters_system():

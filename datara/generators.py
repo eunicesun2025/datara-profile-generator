@@ -57,16 +57,30 @@ def prompt(p: Profile) -> str:
                 "\n三、字段说明"]
     for t, fields in ai_tables(p):
         sections.append(f"\n{t.name}（{'单个对象' if t.role == 'head' else '明细对象数组'}）")
+        sections.append("表级定位：提取整份单据的主体信息；不能把明细行上的值误填为单据级汇总。" if t.role == "head" else
+                        "表级定位：逐条识别实际明细；保持页面阅读顺序；排除表头、页脚、小计和合计，跨页重复表头不作为明细。")
         for f in fields:
             desc = f"- {f.name}：{f.description or f.name}；类型 {f.data_type}"
             if f.data_type == "Choice":
                 desc += "；有效选项 " + json.dumps(f.choice_values, ensure_ascii=False)
             sections.append(desc)
+            type_rules = {
+                "Date": "结合该日期标签及单据上下文区分开票、到期、付款等日期；仅将有充分依据的完整日期转换为 YYYYMMDD，月日或年份有歧义且无法消除时返回 null。",
+                "Decimal": "依据字段标签区分单价、行金额、税额与总额；移除明确的千分位与货币符号后输出数值，保留负号和实际小数。不得凭空换汇、计算或补默认金额。",
+                "Integer": "只提取有证据的整数计数，不把业务编号转为数值，不对小数四舍五入。",
+                "Boolean": "只有明确的勾选、标记或肯定/否定文字才输出 true/false；未出现对应信息时返回 null。",
+                "String": "按字段含义读取完整文字；业务编号、账号等按字符串保留前导零和有意义的分隔符，不翻译专有名称或补写不可见文字。",
+                "Choice": "仅输出列出的有效选项；无法根据单据证据唯一对应到某一选项时返回 null。",
+            }
+            sections.append("  类型处理：" + type_rules[f.data_type])
+            if f.is_required:
+                sections.append("  业务必填：优先核对；证据不足仍返回 null，交由人工补充。")
             if f.extraction.strip():
                 sections.append("  识别规则：" + f.extraction.strip())
     if p.document_rules.strip():
         sections += ["\n四、单据与明细识别规则", p.document_rules.strip()]
     sections += ["\n五、统一输出要求（优先于与之冲突的业务说明）",
+                 "先核对单据类型，再逐表定位字段；同名标签按所属主体和区域区分。跨页只合并确有延续证据的记录，不能凭相同金额或相似文字擅自去重。",
                  "只输出可解析 JSON，不要 Markdown、解释或未定义的键。表名、字段名及大小写必须与结构一致。",
                  "符合单据类型时，保留结构中的每个表和每个字段键；无法识别的值返回 null，包括必填值。",
                  "没有识别到某张子表的真实明细记录时，该表返回 []，不能用全 null 的占位对象代替。",

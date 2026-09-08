@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import re
+import unicodedata
 from datetime import datetime
 from decimal import Decimal
 from typing import Literal
@@ -56,6 +57,7 @@ class Profile(Model):
     database_schema: str = Field(default="dbo", max_length=128)
     tables: list[TableDef] = Field(default_factory=list, max_length=20)
     sample_ids: list[str] = Field(default_factory=list, max_length=20)
+    reference_ids: list[str] = Field(default_factory=list, max_length=10)
     updated_at: str | None = None
 
 
@@ -84,10 +86,67 @@ def required_names(table: TableDef) -> list[str]:
     return HEAD_SYSTEM if table.role == "head" else DETAIL_SYSTEM
 
 
+def snake_name(value: str) -> str:
+    """Deterministic identifiers; unknown non-ASCII labels remain distinguishable."""
+    value = unicodedata.normalize("NFKC", value).strip()
+    aliases = {"日期": "date", "金额": "amount", "总金额": "total_amount", "发票日期": "invoice_date",
+               "发票号码": "invoice_number", "账号": "account_no", "数量": "quantity", "单价": "unit_price",
+               "币种": "currency", "供应商": "vendor_name", "公司名称": "company_name"}
+    value = aliases.get(value, value)
+    value = re.sub(r"([A-Z]+)([A-Z][a-z])", r"\1_\2", value)
+    value = re.sub(r"([a-z0-9])([A-Z])", r"\1_\2", value).lower()
+    value = "".join(c if c.isascii() else f"_u{ord(c):x}_" for c in value)
+    value = re.sub(r"[^a-z0-9]+", "_", value).strip("_") or "field"
+    if not value[0].isalpha():
+        value = "field_" + value
+    return value[:120].rstrip("_")
+
+
+def infer_type(name: str, description: str = "", proposed: str = "String") -> str:
+    """Conservative semantic defaults. Never infer identifiers from numeric samples."""
+    text = snake_name(name) + " " + description.lower()
+    if re.search(r"(?:^|_)(?:id|no|number|code|account|phone|postal|zip)(?:_|\b)|账号|编号|号码|代码|电话", text):
+        return "String"
+    if re.search(r"(?:^|_)(?:date|dob)(?:_|\b)|日期|出生年月", text):
+        return "Date"
+    if re.search(r"(?:^|_)(?:amount|price|quantity|qty|rate|balance|total|subtotal|tax)(?:_|\b)|金额|单价|数量|税率|余额|税额", text):
+        return "Decimal"
+    if re.search(r"(?:^|_)(?:count|pages)(?:_|\b)|页数|件数", text):
+        return "Integer"
+    return proposed if proposed in DEFAULT_SQL else "String"
+
+
+def suggest_displays(profile: Profile) -> None:
+    """Fill a useful five-column head list only when no list selection exists."""
+    for table in profile.tables:
+        if table.role != "head" or any(f.head_display is not None for f in table.fields):
+            continue
+        fields = [f for f in table.fields if f.source == "AI"]
+        for i, field in enumerate(fields[:5], 1):
+            field.head_display = i
+
+
 def normalize(profile: Profile, repair_system: bool = False) -> list[str]:
     """Add mandatory fields and derive order. Only imports may repair legacy sources."""
     notes = []
     for table in profile.tables:
+        occupied = {f.name for f in table.fields if FIELD_NAME.fullmatch(f.name)}
+        for field in table.fields:
+            if FIELD_NAME.fullmatch(field.name):
+                continue
+            old, name = field.name, snake_name(field.name)
+            if name in SYSTEM and name in occupied:
+                raise ValueError(f"{table.name}.{old}：规范化后与 System 字段 {name} 冲突，请先确认字段含义")
+            base, n = name, 2
+            while name in occupied:
+                name = f"{base}_{n}"
+                n += 1
+            field.name = name
+            field.reviewed = False
+            occupied.add(name)
+            if not field.description and any(not c.isascii() for c in old):
+                field.description = old
+            notes.append(f"{table.name}：字段名 {old} 已规范为 {name}")
         for name in required_names(table):
             existing = next((f for f in table.fields if f.name == name), None)
             dtype, sql, label = SYSTEM[name]

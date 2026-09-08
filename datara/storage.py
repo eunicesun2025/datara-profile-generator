@@ -15,7 +15,7 @@ class Conflict(Exception):
 class Store:
     def __init__(self, root: Path):
         self.root = root.resolve()
-        for folder in ["profiles", "samples", "tests", "exports", "imports"]:
+        for folder in ["profiles", "samples", "tests", "exports", "imports", "references"]:
             (self.root / folder).mkdir(parents=True, exist_ok=True)
         self.lock = threading.Lock()
 
