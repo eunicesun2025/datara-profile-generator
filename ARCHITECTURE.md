@@ -148,7 +148,7 @@ Export normalizes the request, reloads the persisted Profile, and requires both 
 
 ### 6. Optional sample/model flows
 
-Uploaded PDFs, PNGs, or JPEGs are stored locally; all are converted to JPEG pages for preview/model input. Reference XLSX/DOCX/text-like files are converted to bounded text and stored separately. An analysis job sends the complete current field/rule context, selected sample pages, selected reference text, and the user's field request to the configured endpoint. Reference content is a separate user-content part and both prompts explicitly treat document content as untrusted data rather than instructions. Returned suggestions may update Profile document rules and add or update AI fields on existing tables; they cannot modify Manual/System fields or create tables, and nothing is applied until the user selects it. An extraction job sends the generated extraction prompt and images, strictly parses the returned JSON, and validates it against the AI-only Profile projection.
+Uploaded PDFs, PNGs, or JPEGs are stored locally; all are converted to JPEG pages for preview/model input. Reference XLSX/DOCX/text-like files are converted to bounded text and stored separately. An analysis job sends the complete current field/rule context, selected sample pages, selected reference text, and the user's field request to the configured endpoint. Reference content is explicitly delimited inside the single user text part, before the image parts; using one text part avoids a known incompatibility in OpenAI-compatible enterprise gateways that accept multimodal arrays but reject repeated text parts. Both prompts explicitly treat document content as untrusted data rather than instructions. Returned suggestions may update Profile document rules and add or update AI fields on existing tables; they cannot modify Manual/System fields or create tables, and nothing is applied until the user selects it. An extraction job sends the generated extraction prompt and images, strictly parses the returned JSON, and validates it against the AI-only Profile projection.
 
 ### 7. Job persistence and restart behavior
 
@@ -272,7 +272,7 @@ HTTP (without TLS) is accepted by validation. Redirect following is disabled. Th
 21. Version `0.1.0` is duplicated in `pyproject.toml` and two API responses; the UI separately displays `v0.1`.
 22. Limits and operational constants are distributed across middleware, endpoints, media, provider, Pydantic models, and JavaScript rather than centralized.
 23. ZIP member timestamps are fixed to `2026-01-01 00:00:00`; this helps reproducibility but is an unexplained hard-coded date rather than Profile metadata.
-24. Reference extraction is format-specific and text-only: DOCX tables are flattened with paragraph text, XLSX is serialized as JSON rows, and scanned reference documents require the sample-image path.
+24. Reference extraction is format-specific and text-only: DOCX tables are flattened with paragraph text, XLSX is serialized as JSON rows with blank rows and trailing blank cells removed, and scanned reference documents require the sample-image path.
 
 ## Architecture traceability table
 

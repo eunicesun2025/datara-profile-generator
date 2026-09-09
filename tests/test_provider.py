@@ -51,6 +51,33 @@ def test_compatible_http_request_contains_visual_input(tmp_path, monkeypatch):
     assert result == "{}"
 
 
+def test_reference_uses_one_text_part_for_enterprise_gateway_compatibility(tmp_path, monkeypatch):
+    image = tmp_path / "1.jpg"
+    image.write_bytes(b"example-jpeg-bytes")
+    real_client = httpx.AsyncClient
+    def handler(request):
+        payload = json.loads(request.content)
+        content = payload["messages"][1]["content"]
+        assert [part["type"] for part in content] == ["text", "image_url"]
+        assert "REFERENCE_ONLY" in content[0]["text"]
+        assert "BEGIN USER REFERENCE DATA" in content[0]["text"]
+        return httpx.Response(200, json={"choices": [{"message": {"content": "{}"}, "finish_reason": "stop"}]})
+    monkeypatch.setattr("datara.provider.httpx.AsyncClient", lambda **kwargs: real_client(transport=httpx.MockTransport(handler), **kwargs))
+    result = asyncio.run(completion(Connection(base_url="https://vision.test/v1", model="company-model"),
+                                    "local-test-key", "任务", [image], "REFERENCE_ONLY"))
+    assert result == "{}"
+
+
+def test_reference_gateway_error_is_actionable_without_echoing_response(monkeypatch):
+    real_client = httpx.AsyncClient
+    transport = httpx.MockTransport(lambda r: httpx.Response(400, text="secret provider request details"))
+    monkeypatch.setattr("datara.provider.httpx.AsyncClient", lambda **kwargs: real_client(transport=transport, **kwargs))
+    with pytest.raises(ValueError, match="参考文字 14 字符") as error:
+        asyncio.run(completion(Connection(base_url="https://vision.test/v1", model="test"),
+                               "private-key", "任务", [], "REFERENCE_ONLY"))
+    assert "secret provider" not in str(error.value)
+
+
 @pytest.mark.parametrize("status", [401, 429, 500])
 def test_provider_errors_do_not_echo_sensitive_response(monkeypatch, status):
     real_client = httpx.AsyncClient

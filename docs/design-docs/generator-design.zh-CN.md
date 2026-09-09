@@ -42,7 +42,7 @@ Profile → 修正字段名/补 System 字段/重排 → 校验 → 投影 → �
 支持 XLSX、DOCX、TXT、MD、JSON、CSV、SQL，单文件最多 8 MiB：
 
 - 文本优先 UTF-8/BOM，失败后尝试 GB18030。
-- XLSX 每 Sheet 最多 1000 行/100 列并序列化为 JSON 行。
+- XLSX 每 Sheet 最多 1000 行/100 列并序列化为 JSON 行；空白行和行尾空白单元格不发送，同时保留非空内容的原始行号。
 - DOCX 从有界 OOXML 中提取段落/表格文字，不执行宏或嵌入内容。
 - 空内容和超过 60,000 字符的内容直接拒绝，不静默截断。
 - 扫描版资料应作为样张上传，因为参考解析器不做 OCR。
@@ -51,7 +51,7 @@ API 返回参考文件 ID、文件名和字符数，不返回提取文本。一�
 
 ### AI 分析输入与输出
 
-输入包括当前 Profile、一个样张 ID、Profile 上的参考文件 ID，以及用户希望提取的字段描述。系统提示词包含全部表/字段上下文和当前单据规则；用户消息包含独立标界的参考文字和 JPEG 页面。样张/参考中的指令均被声明为待分析数据，不能修改系统任务。
+输入包括当前 Profile、一个样张 ID、Profile 上的参考文件 ID，以及用户希望提取的字段描述。系统提示词包含全部表/字段上下文和当前单据规则；用户消息只有一个文本块，其中包含固定任务说明和独立标界的参考文字，后面再跟 JPEG 页面。单文本块是已经实现的企业 OpenAI-compatible 网关兼容措施：部分网关能接受多模态数组，却会拒绝同一消息内重复的文本块。样张/参考中的指令均被声明为待分析数据，不能修改系统任务。
 
 模型应返回：
 
@@ -265,7 +265,7 @@ DataType, ChoiceValues, IsRequired, Source, HeadDisplay, FieldOrder
 
 ### 请求封装
 
-系统提示词放在 system message；user message 包含固定说明、可选的独立参考文本段和 JPEG data URL。请求包含 `model`、`max_tokens`、`stream=false`，不包含 temperature、response_format、JSON Schema、seed 或重试策略。
+系统提示词放在 system message；user message 只包含一个文本块（固定说明和可选的独立标界参考资料），随后是 JPEG data URL。请求包含 `model`、`max_tokens`、`stream=false`，不包含 temperature、response_format、JSON Schema、seed 或重试策略。
 
 ## JSON 结构与 Mapping 的关系
 

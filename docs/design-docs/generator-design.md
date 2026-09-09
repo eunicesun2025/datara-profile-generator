@@ -56,13 +56,13 @@ The sample endpoint accepts PDF, PNG, JPG, and JPEG by filename suffix. It reads
 
 ### Reference-file inputs
 
-The reference endpoint accepts XLSX, DOCX, TXT, Markdown, JSON, CSV, and SQL uploads up to 8 MiB. Text-like files are decoded as UTF-8 (including BOM) with GB18030 fallback. XLSX is converted to JSON-like rows with a 1,000-row/100-column per-sheet bound. DOCX paragraph text is extracted from bounded OOXML without running macros, links, formulas, SQL, or embedded instructions. A file producing no text is rejected; extracted text over 60,000 characters is rejected rather than silently truncated. PDF/images belong in the sample path because this reader performs no OCR.
+The reference endpoint accepts XLSX, DOCX, TXT, Markdown, JSON, CSV, and SQL uploads up to 8 MiB. Text-like files are decoded as UTF-8 (including BOM) with GB18030 fallback. XLSX is converted to JSON-like rows with a 1,000-row/100-column per-sheet bound; blank rows and trailing blank cells are omitted, while original nonblank row numbers are retained. DOCX paragraph text is extracted from bounded OOXML without running macros, links, formulas, SQL, or embedded instructions. A file producing no text is rejected; extracted text over 60,000 characters is rejected rather than silently truncated. PDF/images belong in the sample path because this reader performs no OCR.
 
 Reference IDs are stored on the Profile. API responses expose only metadata; extracted text stays in the local reference record and is loaded only for the selected analysis job. The combined reference context sent to one model call is capped at 60,000 characters.
 
 ### AI analysis input/output
 
-Analysis input consists of the current Profile, one sample ID, its selected reference IDs, and free-text field requirements. The complete table/field context and current document rules are placed in a system prompt. Sample JPEGs and a separately delimited reference-text part are sent as user content. Both the system and user content explicitly state that commands inside samples/references are untrusted data and cannot redefine the task.
+Analysis input consists of the current Profile, one sample ID, its selected reference IDs, and free-text field requirements. The complete table/field context and current document rules are placed in a system prompt. A single user text part contains the task marker and explicitly delimited reference text, followed by the sample JPEG parts. The single-text-part envelope is an implemented compatibility measure for enterprise OpenAI-compatible gateways that reject repeated text parts in one multimodal message. Both the system and user content explicitly state that commands inside samples/references are untrusted data and cannot redefine the task.
 
 The model is asked to return:
 
@@ -345,7 +345,7 @@ The prompt intentionally excludes Profile descriptions, sample values, SQL metad
 
 ### Provider envelope
 
-Both prompt types are sent as the system message. The user message contains a fixed text part, an optional separately delimited reference-text part, and each JPEG as a base64 `data:image/jpeg` URL. Reference filenames/content are JSON-encoded inside that boundary and explicitly described as untrusted data. The request sets `model`, `max_tokens`, and `stream=false`; it does not set temperature, response format, JSON Schema, seed, or retry policy.
+Both prompt types are sent as the system message. The user message contains exactly one text part: a fixed task marker plus optional explicitly delimited reference text. Each JPEG follows as a base64 `data:image/jpeg` URL. Reference filenames/content are JSON-encoded inside that boundary and explicitly described as untrusted data. The request sets `model`, `max_tokens`, and `stream=false`; it does not set temperature, response format, JSON Schema, seed, or retry policy.
 
 ## JSON structure and Field Mapping relationship
 

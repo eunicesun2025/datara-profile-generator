@@ -146,6 +146,21 @@ def test_reference_formats_and_limits():
         reference_text(b"  ", "empty.txt")
 
 
+def test_reference_xlsx_omits_blank_rows_and_trailing_cells():
+    from openpyxl import Workbook
+
+    book = Workbook()
+    sheet = book.active
+    sheet.title = "Fields"
+    sheet.cell(row=3, column=1, value="Invoice Date")
+    sheet.cell(row=3, column=2, value="Date")
+    sheet.cell(row=20, column=5, value=None)
+    out = io.BytesIO()
+    book.save(out)
+    parsed = json.loads(reference_text(out.getvalue(), "reference.xlsx"))
+    assert parsed == [{"sheet": "Fields", "rows": [{"row": 3, "values": ["Invoice Date", "Date"]}]}]
+
+
 def test_reference_analysis_job_end_to_end(tmp_path, monkeypatch):
     async def fake_completion(c, key, instructions, images, reference_text=""):
         assert "REFERENCE_ONLY" in reference_text

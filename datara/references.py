@@ -27,7 +27,15 @@ def reference_text(content: bytes, filename: str) -> str:
             for ws in wb:
                 if ws.max_row > 1000 or ws.max_column > 100:
                     raise ValueError("参考 Excel 每张表最多 1,000 行、100 列，请只上传相关字段资料")
-                sheets.append({"sheet": ws.title, "rows": [[scalar(v) for v in row] for row in ws.iter_rows(values_only=True)]})
+                rows = []
+                for row_number, row in enumerate(ws.iter_rows(values_only=True), start=1):
+                    values = [scalar(value) for value in row]
+                    while values and values[-1] in {None, ""}:
+                        values.pop()
+                    if any(value not in {None, ""} for value in values):
+                        rows.append({"row": row_number, "values": values})
+                if rows:
+                    sheets.append({"sheet": ws.title, "rows": rows})
             text = json.dumps(sheets, ensure_ascii=False)
         finally:
             wb.close()
