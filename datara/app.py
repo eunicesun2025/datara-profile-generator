@@ -14,6 +14,7 @@ from fastapi import FastAPI, File, HTTPException, Request, UploadFile
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
+from dotenv import load_dotenv
 
 from .domain import (DEFAULT_SQL, SYSTEM, FieldDef, Model, Profile, TableDef, json_schema,
                      new_profile, normalize, strict_json, uid, validate_profile, validate_result,
@@ -26,6 +27,13 @@ from .references import reference_text, MAX_TEXT
 from .storage import Conflict, Store
 from .optimizer import ensure_prompt_version
 from .optimizer_routes import register_optimizer_routes
+
+def load_runtime_environment(root: Path | None = None) -> None:
+    """Load local project secrets without overriding deployment environment variables."""
+    load_dotenv((root or Path.cwd()) / ".env", override=False, encoding="utf-8")
+
+
+load_runtime_environment()
 
 STATIC = Path(__file__).parent / "static"
 

@@ -89,7 +89,17 @@ Base URL 是基础地址，例如 `https://your-endpoint.example/v1`，应用追
 
 模型必须支持图片输入和 OpenAI-compatible 消息结构。默认 ID 的账号可用性与图片能力尚未通过真实接口验证，请以账号实际可调用的 ID 为准。「测试连接」验证文本请求，「测试提取」验证图片请求。
 
-API Key 只保留在当前服务进程中，重启后需重新填写。也可在启动前配置环境变量：
+在页面填写的 API Key 只保留在当前服务进程中。若不想每次重启后重新填写，可复制项目根目录的 `.env.example` 为 `.env`，只填写一次：
+
+```bash
+cp .env.example .env
+# 使用文本编辑器打开 .env，将 DATARA_API_KEY= 后面改为真实密钥
+./run.command
+```
+
+Windows 可在项目目录执行 `copy .env.example .env`，编辑 `.env` 后双击或运行 `run.cmd`。
+
+应用启动时会自动读取当前工作目录下的 `.env`。`.env` 已被 Git 忽略；操作系统、服务器、容器或 CI 中已经设置的环境变量优先，不会被 `.env` 覆盖。也可继续直接配置环境变量：
 
 ```bash
 export DATARA_API_KEY='your-key'
@@ -97,7 +107,7 @@ export DATARA_DATA_DIR='/your/private/data-directory'
 ./run.command
 ```
 
-不要把真实密钥提交到 Git。`.env.example` 仅是环境变量说明，应用不会隐式读取 `.env` 文件。设置持久化文件只包含端点、模型及超时等非密钥配置。
+不要把真实密钥提交到 Git，也不要把真实值写进 `.env.example`。设置持久化文件只包含端点、模型及超时等非密钥配置。
 
 模型请求读取 HTTPS_PROXY / HTTP_PROXY / NO_PROXY 和 SSL_CERT_FILE / SSL_CERT_DIR，保持 TLS 验证；详见跨平台指南。模型的图片数量、容量与 token 限制由实际端点决定；应用另有 18MB 图片总量限制，会报错而非丢页。
 

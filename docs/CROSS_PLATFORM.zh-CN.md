@@ -59,6 +59,26 @@ uv run --frozen python -m uvicorn datara.app:app --host 127.0.0.1 --port 8765
 
 浏览器打开 http://127.0.0.1:8765 。终端保持开启，Ctrl+C 停止。更新代码后先停止旧服务，再 git pull --ff-only、uv sync --frozen 并重新启动。不要同时启动两个进程写同一 data 目录。
 
+## 持久配置 API Key
+
+项目启动时会自动读取项目根目录的 `.env`，且操作系统、服务器或容器中已有的环境变量优先。`.env` 已被 Git 忽略，不会随代码提交。
+
+Windows：
+
+```bat
+copy .env.example .env
+run.cmd
+```
+
+Mac：
+
+```bash
+cp .env.example .env
+bash run.command
+```
+
+首次复制后，用文本编辑器把 `.env` 中的 `DATARA_API_KEY=` 改成真实密钥。不要把真实密钥写入 `.env.example`，也不要提交或发送 `.env`。
+
 ## 公司网络：证书和代理分别处理
 
 旧版关闭了 HTTPX 的环境配置，导致 HTTPS_PROXY 和 SSL_CERT_FILE 不生效。新版启用这些变量并保持 TLS 证书验证。GitHub 能拉代码不代表模型域名也可访问，两者可能使用不同代理、信任库和网络放行规则。

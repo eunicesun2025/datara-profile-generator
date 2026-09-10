@@ -1,5 +1,6 @@
 import io
 import json
+import os
 import time
 
 import pytest
@@ -7,7 +8,7 @@ from fastapi.testclient import TestClient
 from openpyxl import Workbook
 from PIL import Image
 
-from datara.app import create_app
+from datara.app import create_app, load_runtime_environment
 from datara.domain import FieldDef, new_profile
 from datara.importer import inspect_workbook, parse_fields
 
@@ -16,6 +17,20 @@ from datara.importer import inspect_workbook, parse_fields
 def client(tmp_path):
     with TestClient(create_app(tmp_path)) as c:
         yield c
+
+
+def test_project_env_loads_once_without_overriding_environment(tmp_path, monkeypatch):
+    (tmp_path / ".env").write_text(
+        "DATARA_API_KEY=local-project-key\nDATARA_DATA_DIR=local-data\n",
+        encoding="utf-8",
+    )
+    monkeypatch.delenv("DATARA_API_KEY", raising=False)
+    monkeypatch.setenv("DATARA_DATA_DIR", "deployment-data")
+
+    load_runtime_environment(tmp_path)
+
+    assert os.environ["DATARA_API_KEY"] == "local-project-key"
+    assert os.environ["DATARA_DATA_DIR"] == "deployment-data"
 
 
 def test_save_reload_conflict_and_export(client):
