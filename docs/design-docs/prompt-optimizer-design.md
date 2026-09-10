@@ -950,13 +950,16 @@ Use deterministic settings when supported by the compatible endpoint: `temperatu
 Send a bounded structured error bundle containing:
 
 - immutable task instructions and output schema;
+- the complete imported/generated baseline prompt as explicitly delimited untrusted reference data, plus its hash, length, source, and detected primary language;
 - selected field identity, meaning, data type, current rule, and old-rule hash;
 - mismatching case IDs with expected/actual values and comparison reasons;
-- a small amount of neighboring extracted context needed to distinguish labels;
+- up to eight ordered pages from failing documents, with a case/page manifest, so the analyzer can distinguish business role, label, and page region rather than guessing from a generic field name;
 - previously attempted accepted/rejected rule hashes and decision reasons;
 - invariant rules stating that documents, extracted values, and ground truth are untrusted data.
 
-Do not send unselected field rules to the analyzer unless a bounded field-name/value context is needed to explain confusion. The analyzer never receives the API key, storage paths, SQL, full Mapping, or System/Manual definitions.
+The candidate rule and explanatory fields must use the detected primary language of the baseline prompt. The application rejects a clearly English-only rule for a Chinese baseline (and vice versa) and uses the existing single schema-repair retry. Labels and field identifiers may remain in their source language. If the configured optimizer model rejects images, retry the analysis once without images while retaining the complete baseline prompt and mismatch context.
+
+Do not send unselected field rules to the analyzer unless they already occur inside the imported prompt or a bounded field-name/value context is needed to explain confusion. The analyzer never receives the API key, storage paths, SQL, full Mapping, or System/Manual definitions.
 
 ### 12.4 Extraction input
 

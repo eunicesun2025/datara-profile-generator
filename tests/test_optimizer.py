@@ -12,7 +12,9 @@ from datara.app import create_app
 from datara.domain import FieldDef, TableDef, new_profile, normalize
 from datara.evaluation import compare_values, evaluate_output
 from datara.generators import profile_with_field_rules, prompt_components
-from datara.optimizer import IMPORTED_OVERRIDE_MARKER, PromptOptimizerService, ensure_prompt_version
+from datara.optimizer import (IMPORTED_OVERRIDE_MARKER, PromptOptimizerService,
+                              candidate_uses_language, ensure_prompt_version, import_prompt_version,
+                              prompt_language)
 from datara.optimizer_models import CandidateResponse, ComparisonPolicy
 from datara.provider import Connection
 from datara.storage import Store
@@ -32,6 +34,81 @@ def test_exact_and_normalized_comparisons():
                           ComparisonPolicy(mode="normalized"))["matched"]
     assert not compare_values("01/09/2026", "2026-09-01", "Date",
                               ComparisonPolicy(mode="normalized"))["matched"]
+
+
+def test_prompt_language_detection_and_candidate_guard():
+    assert prompt_language("请读取发票购买方的完整公司名称，并排除开票方和页脚公司名称。") == "zh-CN"
+    assert prompt_language("Extract the complete buyer company name from the invoice header.") == "en"
+    assert candidate_uses_language("优先读取 BILL TO 标签后的完整公司名称。", "zh-CN")
+    assert not candidate_uses_language("Extract the issuer company from the header.", "zh-CN")
+
+
+def test_candidate_retries_when_rule_language_differs_from_imported_prompt(tmp_path, monkeypatch):
+    calls = 0
+
+    async def fake_completion(connection, key, instructions, images, reference_text=""):
+        nonlocal calls
+        calls += 1
+        assert reference_text == imported["imported_prompt_base"]
+        rule = ("Extract the buyer company from the invoice header."
+                if calls == 1 else "提取发票购买方的完整公司名称，并排除开票方。")
+        return json.dumps({"analyses": [], "candidate_rules": [{
+            "field_id": company.id, "old_rule_hash": hashlib.sha256(b"").hexdigest(),
+            "new_rule": rule, "reason": "保持原提示词语言",
+        }]})
+
+    store = Store(tmp_path)
+    profile = new_profile("中文提示词")
+    company = FieldDef(name="company_name", description="发票购买方")
+    profile.tables[0].fields.insert(0, company)
+    profile = store.save(profile)
+    imported = import_prompt_version(
+        store, profile, "这是当前使用的中文发票提示词。请返回严格 JSON，并提取购买方公司名称。", profile.revision)
+    monkeypatch.setattr("datara.optimizer.completion", fake_completion)
+    service = PromptOptimizerService(store, lambda: Connection(), lambda: "key")
+    response, _ = asyncio.run(service._candidate(
+        {"selected_fields": [{"field_id": company.id}], "run_test_cases": []},
+        imported, [], []))
+    assert calls == 2
+    assert response.candidate_rules[0].new_rule.startswith("提取发票购买方")
+
+
+def test_candidate_falls_back_to_text_when_optimizer_model_rejects_images(tmp_path, monkeypatch):
+    image_counts = []
+
+    async def fake_completion(connection, key, instructions, images, reference_text=""):
+        image_counts.append(len(images))
+        assert reference_text == imported["imported_prompt_base"]
+        if images:
+            raise ValueError("模型接口返回 HTTP 400：包含参考资料的请求被网关拒绝")
+        return json.dumps({"analyses": [], "candidate_rules": [{
+            "field_id": company.id, "old_rule_hash": hashlib.sha256(b"").hexdigest(),
+            "new_rule": "提取发票购买方的完整公司名称。", "reason": "按购买方角色定位",
+        }]})
+
+    store = Store(tmp_path)
+    profile = new_profile("图片降级")
+    company = FieldDef(name="company_name", description="发票购买方")
+    profile.tables[0].fields.insert(0, company)
+    profile = store.save(profile)
+    imported = import_prompt_version(
+        store, profile, "这是当前使用的中文发票提示词。请返回严格 JSON，并提取购买方公司名称。", profile.revision)
+    sample_folder = store.path("samples", "failure-sample", "")
+    sample_folder.mkdir(parents=True)
+    (sample_folder / "meta.json").write_text(json.dumps({"pages": 1}), encoding="utf-8")
+    Image.new("RGB", (30, 30), "white").save(sample_folder / "1.jpg", "JPEG")
+    run = {
+        "selected_fields": [{"field_id": company.id}],
+        "run_test_cases": [{"test_case_id": "failure-case", "dataset_role": "failure",
+                            "sample_id": "failure-sample", "name": "failure"}],
+    }
+    evaluations = [{"test_case_id": "failure-case", "dataset_role": "failure",
+                    "field_id": company.id, "matched": False}]
+    monkeypatch.setattr("datara.optimizer.completion", fake_completion)
+    service = PromptOptimizerService(store, lambda: Connection(), lambda: "key")
+    response, _ = asyncio.run(service._candidate(run, imported, evaluations, []))
+    assert image_counts == [1, 0]
+    assert response.candidate_rules[0].new_rule.startswith("提取发票购买方")
 
 
 def test_field_rule_override_is_copy_only_and_ai_only():
@@ -118,7 +195,7 @@ def test_optimizer_workflow_promote_and_version_history(tmp_path, monkeypatch):
 
     async def fake_completion(connection, key, instructions, images, reference_text=""):
         assert key == "optimizer-key"
-        if not images:
+        if "Datara 字段级提取提示词优化器" in instructions:
             return json.dumps({
                 "analyses": [{
                     "field_id": field_id, "table_name": "AI_Document", "field_name": "amount",
@@ -127,12 +204,12 @@ def test_optimizer_workflow_promote_and_version_history(tmp_path, monkeypatch):
                 }],
                 "candidate_rules": [{
                     "field_id": field_id, "old_rule_hash": hashlib.sha256(b"").hexdigest(),
-                    "new_rule": "Read the value next to the grand total label.",
-                    "reason": "Avoid subtotal values.",
+                    "new_rule": "读取大写总计标签旁的金额，并排除小计金额。",
+                    "reason": "避免误取小计金额。",
                 }],
             })
         is_failure = images[0].parent.name == failure_sample_id
-        optimized = "grand total label" in instructions
+        optimized = "大写总计标签" in instructions
         value = 100 if is_failure and optimized else 90 if is_failure else 50
         return json.dumps({"AI_Document": {"amount": value}})
 
@@ -188,7 +265,7 @@ def test_optimizer_workflow_promote_and_version_history(tmp_path, monkeypatch):
         promoted = promoted.json()
         assert promoted["profile"]["revision"] == profile["revision"] + 1
         current = next(f for f in promoted["profile"]["tables"][0]["fields"] if f["id"] == field_id)
-        assert current["extraction"] == "Read the value next to the grand total label."
+        assert current["extraction"] == "读取大写总计标签旁的金额，并排除小计金额。"
         history = client.get(f"/api/profiles/{profile['id']}/prompt-versions").json()
         assert history["active_prompt_version_id"] == promoted["prompt_version"]["id"]
         assert len(history["versions"]) >= 3
@@ -240,13 +317,13 @@ def test_regression_guard_rejects_failure_only_improvement(tmp_path, monkeypatch
     field_id = None
 
     async def fake_completion(connection, key, instructions, images, reference_text=""):
-        if not images:
+        if "Datara 字段级提取提示词优化器" in instructions:
             return json.dumps({"analyses": [], "candidate_rules": [{
                 "field_id": field_id, "old_rule_hash": hashlib.sha256(b"").hexdigest(),
-                "new_rule": "candidate rule", "reason": "fix failure",
+                "new_rule": "候选规则：读取最终金额。", "reason": "修复待修复案例",
             }]})
         failure = images[0].parent.name == failure_sample_id
-        candidate = "candidate rule" in instructions
+        candidate = "候选规则" in instructions
         value = 10 if failure and candidate else 9 if failure else 19 if candidate else 20
         return json.dumps({"AI_Document": {"amount": value}})
 
@@ -330,25 +407,28 @@ def test_imported_prompt_is_active_baseline_and_candidate_only_appends_selected_
 def test_invoice_company_optimizer_runs_with_imported_prompt_and_no_regression_set(tmp_path, monkeypatch):
     sample_expectations = {}
     company_field_id = None
+    imported_text = ""
 
     async def fake_completion(connection, key, instructions, images, reference_text=""):
-        if not images:
+        if "Datara 字段级提取提示词优化器" in instructions:
+            assert reference_text == imported_text
+            assert len(images) == 2
+            assert '"original_prompt_language": "zh-CN"' in instructions
             return json.dumps({
                 "analyses": [{
                     "field_id": company_field_id, "table_name": "AI_Invoice_Head",
                     "field_name": "company_name", "error_type": "label_confusion",
-                    "root_cause": "The prompt allowed a brand-keyword fallback to beat the buyer role.",
-                    "evidence": ["BILL TO and footer/header contain different entities from the same group"],
-                    "suggested_change": "Use the invoiced customer role and ignore seller/header/footer names.",
+                    "root_cause": "原规则没有明确多个集团公司同时出现时的业务角色优先级。",
+                    "evidence": ["BILL TO 与页眉、页脚出现同集团的不同公司"],
+                    "suggested_change": "优先按购买方或收件方角色取值，并排除卖方与页脚。",
                 }],
                 "candidate_rules": [{
                     "field_id": company_field_id,
                     "old_rule_hash": hashlib.sha256(b"buyer company rule").hexdigest(),
-                    "new_rule": ("Extract the legal entity that is the invoice recipient or buyer. Prefer BILL TO, "
-                                 "BILLED TO, INVOICE TO, BUYER, or CUSTOMER. On self-billing invoices, use the "
-                                 "recipient address block. Never choose a seller, issuer, logo, corporate-office "
-                                 "header, remittance block, or page footer merely because it shares a brand."),
-                    "reason": "Resolve multiple group entities by business role and page region.",
+                    "new_rule": ("提取作为发票购买方、付款方或收件方的完整法定公司名称。优先读取 BILL TO、"
+                                 "BILLED TO、INVOICE TO、BUYER 或 CUSTOMER 标签后的公司；自开票单据读取"
+                                 "收件方地址块。排除卖方、开票方、Logo、Corporate Office、汇款信息和页脚公司。"),
+                    "reason": "按业务角色和页面区域区分同集团的多个公司。",
                 }],
             })
         expected = sample_expectations[images[0].parent.name]
@@ -366,10 +446,11 @@ def test_invoice_company_optimizer_runs_with_imported_prompt_and_no_regression_s
         profile.tables[0].fields[:0] = [company, invoice_number]
         company_field_id = company.id
         profile = client.post("/api/profiles/save", json=profile.model_dump()).json()
-        imported_text = "Published supplier invoice prompt with existing JSON and field instructions."
+        imported_text = "这是当前已发布的供应商发票提示词。请按既有 JSON 结构提取字段，并保留所有未选择字段的规则。"
         imported = client.post(f"/api/profiles/{profile['id']}/prompt-versions/import", json={
             "expected_profile_revision": profile["revision"], "prompt_text": imported_text,
         }).json()
+        assert imported["prompt_language"] == "zh-CN"
 
         cases = []
         for filename, color, expected in (
@@ -409,5 +490,7 @@ def test_invoice_company_optimizer_runs_with_imported_prompt_and_no_regression_s
         assert promoted_version["prompt_source"] == "imported"
         assert promoted_version["rendered_prompt"].startswith(imported_text)
         assert IMPORTED_OVERRIDE_MARKER in promoted_version["rendered_prompt"]
+        iteration = client.get(f"/api/optimizer/runs/{run['id']}/iterations").json()[0]
+        assert iteration["diffs"][0]["old_rule_source"] == "imported_prompt"
         saved_fields = promoted.json()["profile"]["tables"][0]["fields"]
         assert next(f for f in saved_fields if f["id"] == invoice_number.id)["extraction"] == "keep invoice number rule"

@@ -7,7 +7,7 @@ from fastapi import FastAPI
 
 from .optimizer import (PromptOptimizerService, create_ground_truth, create_run_record,
                         create_test_case, ensure_prompt_version, import_prompt_version, list_prompt_versions,
-                        promote_version, rollback_version)
+                        promote_version, prompt_language, rollback_version)
 from .optimizer_models import (GroundTruthCreate, OptimizationRunCreate, PromotionRequest,
                                PromptImportRequest, TestCaseCreate, TestCaseUpdate)
 from .storage import Store
@@ -107,9 +107,13 @@ def register_optimizer_routes(app: FastAPI, store: Store, tasks: dict):
         profile = store.load(profile_id)
         active = ensure_prompt_version(store, profile)
         versions = list_prompt_versions(store, profile_id)
+        for version in versions:
+            version["prompt_language"] = version.get("prompt_language") or prompt_language(
+                version.get("imported_prompt_base") or version["rendered_prompt"])
         return {"active_prompt_version_id": active["id"], "versions": [
             {k: v.get(k) for k in ("id", "version_number", "parent_version_id", "origin", "lifecycle",
-                                    "profile_revision", "prompt_hash", "prompt_source", "selected_field_ids",
+                                    "profile_revision", "prompt_hash", "prompt_source", "prompt_language",
+                                    "selected_field_ids",
                                     "optimization_run_id", "iteration_id", "metrics", "created_at")}
             for v in versions
         ]}
@@ -120,7 +124,7 @@ def register_optimizer_routes(app: FastAPI, store: Store, tasks: dict):
         version = import_prompt_version(store, profile, body.prompt_text, body.expected_profile_revision)
         return {k: version.get(k) for k in (
             "id", "version_number", "origin", "lifecycle", "prompt_source", "profile_revision",
-            "prompt_hash", "created_at",
+            "prompt_language", "prompt_hash", "created_at",
         )}
 
     @app.get("/api/prompt-versions/compare")
