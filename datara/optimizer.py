@@ -144,22 +144,133 @@ def ensure_prompt_version(store: Store, profile: Profile, origin: str = "manual_
                                      make_active=True)
 
 
+def imported_prompt_field_rules(profile: Profile, prompt_text: str) -> dict[str, str]:
+    """Extract explicitly labelled AI-field sections from a published prompt.
+
+    Published prompts may use prose that the application does not own, so this maps only
+    unambiguous headings such as ``(company_name)``, ``company_name:`` or
+    ``table.company_name``. Unknown headings still delimit a section so one field cannot
+    accidentally absorb the following field's rules.
+    """
+    known_names = {
+        field.name.casefold()
+        for table in profile.tables for field in table.fields if field.source == "AI"
+    }
+    if not known_names:
+        return {}
+
+    lines = prompt_text.replace("\r\n", "\n").replace("\r", "\n").split("\n")
+    boundaries: list[tuple[int, str | None, str]] = []
+    token = r"[A-Za-z_][A-Za-z0-9_]*"
+    parenthesized = re.compile(rf"\(({token})\)")
+    table_field = re.compile(rf"^\s*({token})\.({token})\s*$")
+    leading_field = re.compile(
+        rf"^\s*(?:[-*•]\s*)?(?:\d+[.)、]\s*)?({token})\s*([:：])\s*(.*)$"
+    )
+
+    for index, line in enumerate(lines):
+        table_match = table_field.match(line)
+        leading_match = leading_field.match(line)
+        parenthetical_tokens = parenthesized.findall(line)
+        name: str | None = None
+        inline = ""
+        if table_match:
+            name = table_match.group(2).casefold()
+        elif parenthetical_tokens:
+            name = parenthetical_tokens[-1].casefold()
+        elif leading_match and not line.lstrip().startswith(('"', "'")):
+            name = leading_match.group(1).casefold()
+            inline = leading_match.group(3).strip()
+        if name is not None:
+            boundaries.append((index, name if name in known_names else None, inline))
+        elif (line == line.strip() and
+              re.match(r"^(?:字段|提取.*(?:字段|行项目)|.*[（(]数组结构[）)])\s*[:：]$", line)):
+            # Top-level prose headings (for example "提取明细行项目（数组结构）：")
+            # delimit the preceding field even when they do not name a Profile field.
+            boundaries.append((index, None, ""))
+
+    extracted_by_name: dict[str, str] = {}
+    for position, (start, name, inline) in enumerate(boundaries):
+        if name is None or name in extracted_by_name:
+            continue
+        end = boundaries[position + 1][0] if position + 1 < len(boundaries) else len(lines)
+        body = lines[start + 1:end]
+        marker_index = next((i for i, value in enumerate(body)
+                             if re.match(r"^\s*识别规则\s*[:：]", value)), None)
+        if marker_index is not None:
+            marker_line = body[marker_index]
+            marker_value = re.sub(r"^\s*识别规则\s*[:：]\s*", "", marker_line)
+            rule_lines = ([marker_value] if marker_value else []) + body[marker_index + 1:]
+        else:
+            rule_lines = ([inline] if inline else []) + body
+        rule = "\n".join(rule_lines).strip()
+        if rule:
+            extracted_by_name[name] = rule
+
+    return {
+        field.id: extracted_by_name[field.name.casefold()]
+        for table in profile.tables for field in table.fields
+        if field.source == "AI" and field.name.casefold() in extracted_by_name
+    }
+
+
 def import_prompt_version(store: Store, profile: Profile, prompt_text: str,
                           expected_profile_revision: int) -> dict:
-    """Register an existing published prompt as the active optimizer baseline."""
+    """Register a published prompt and synchronize its explicit field rules to Profile."""
     if profile.revision != expected_profile_revision:
         raise Conflict("Profile 已更新，请刷新后重新导入提示词")
     cleaned = prompt_text.replace("\x00", "").strip()
     if len(cleaned) < 20:
         raise ValueError("现有提示词内容过短，请粘贴完整提示词")
     current = ensure_prompt_version(store, profile)
-    if current.get("prompt_source") == "imported" and current["rendered_prompt"].strip() == cleaned:
-        return current
-    return create_prompt_version(
-        store, profile, origin="imported_prompt", parent_version_id=current["id"],
-        lifecycle="active", make_active=True, rendered_prompt_override=cleaned + "\n",
-        prompt_source="imported", imported_prompt_base=cleaned,
-    )
+    parsed_rules = imported_prompt_field_rules(profile, cleaned)
+    all_ai_ids = {
+        field.id for table in profile.tables for field in table.fields if field.source == "AI"
+    }
+    # Validate each imported rule in isolation. This also repairs Profiles polluted by
+    # older imports: a rule that conflicts with the canonical null policy is cleared
+    # instead of being accepted merely because the same validation error already existed.
+    empty_rules_profile = profile_with_field_rules(
+        profile, {identity: "" for identity in all_ai_ids})
+    empty_rules_errors = set(validate_profile(empty_rules_profile)["errors"])
+    mapped_rules: dict[str, str] = {}
+    rejected_rule_ids: set[str] = set()
+    safe_profile = profile.model_copy(deep=True)
+    for identity, rule in parsed_rules.items():
+        rule_probe = profile_with_field_rules(empty_rules_profile, {identity: rule})
+        if set(validate_profile(rule_probe)["errors"]) - empty_rules_errors:
+            rejected_rule_ids.add(identity)
+            safe_profile = profile_with_field_rules(safe_profile, {identity: ""})
+            continue
+        mapped_rules[identity] = rule
+        safe_profile = profile_with_field_rules(safe_profile, {identity: rule})
+    original_rules = {
+        field.id: field.extraction for table in profile.tables for field in table.fields
+    }
+    updated_rule_ids = {
+        field.id for table in safe_profile.tables for field in table.fields
+        if original_rules.get(field.id, "").strip() != field.extraction.strip()
+    }
+    synced_profile = store.save(safe_profile) if updated_rule_ids else profile
+    same_prompt = (current.get("prompt_source") == "imported" and
+                   current["rendered_prompt"].strip() == cleaned)
+    if same_prompt and not updated_rule_ids:
+        version = current
+    else:
+        version = create_prompt_version(
+            store, synced_profile, origin="imported_prompt", parent_version_id=current["id"],
+            lifecycle="active", make_active=True, rendered_prompt_override=cleaned + "\n",
+            prompt_source="imported", imported_prompt_base=cleaned,
+        )
+    result = dict(version)
+    result.update({
+        "profile": synced_profile.model_dump(),
+        "mapped_field_ids": sorted(mapped_rules),
+        "updated_field_ids": sorted(updated_rule_ids),
+        "unmapped_field_ids": sorted(all_ai_ids - set(mapped_rules)),
+        "rejected_field_ids": sorted(rejected_rule_ids),
+    })
+    return result
 
 
 def render_imported_prompt(base: str, profile: Profile, overrides: dict[str, str]) -> str:
@@ -317,6 +428,23 @@ def create_run_record(store: Store, body: OptimizationRunCreate) -> dict:
     baseline = ensure_prompt_version(store, profile)
     if body.baseline_prompt_version_id and baseline["id"] != body.baseline_prompt_version_id:
         raise Conflict("当前活动提示词版本已变化，请刷新后重试")
+    if baseline.get("prompt_source") == "imported":
+        baseline_rules = {field["field_id"]: field["extraction_rule"]
+                          for field in baseline["field_rules"]}
+        missing_rules = [
+            identity for identity in body.selected_field_ids
+            if not (baseline_rules.get(identity) or "").strip()
+        ]
+        if missing_rules:
+            field_names = {
+                field.id: f"{table.name}.{field.name}"
+                for table in profile.tables for field in table.fields
+            }
+            names = "、".join(field_names.get(identity, identity) for identity in missing_rules)
+            raise ValueError(
+                "已发布提示词中的字段规则尚未同步到 Profile：" + names +
+                "。请重新导入含明确字段名标题的提示词，或先在字段详情中补充提取规则。"
+            )
     fields, _ = _field_maps(profile)
     selected = []
     for identity in body.selected_field_ids:

@@ -1,0 +1,23 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img" aria-labelledby="title desc">
+  <title id="title">Datara app icon</title>
+  <desc id="desc">A purple geometric D receiving structured data blocks on deep navy</desc>
+  <defs>
+    <linearGradient id="bg" x1="74" y1="51" x2="441" y2="472" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#111746"/><stop offset="1" stop-color="#070B25"/>
+    </linearGradient>
+    <linearGradient id="d" x1="130" y1="124" x2="395" y2="391" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#C6A7FF"/><stop offset=".5" stop-color="#8650F4"/><stop offset="1" stop-color="#6326E8"/>
+    </linearGradient>
+    <linearGradient id="data" x1="111" y1="142" x2="319" y2="334" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#E6D8FF"/><stop offset="1" stop-color="#7132EA"/>
+    </linearGradient>
+  </defs>
+  <rect x="24" y="24" width="464" height="464" rx="112" fill="url(#bg)"/>
+  <path fill="url(#d)" d="M227 119h76c78 0 127 50 127 137s-49 137-127 137h-76v-55h76c45 0 73-29 73-82s-28-82-73-82h-76v-55Z"/>
+  <g fill="url(#data)">
+    <rect x="95" y="167" width="31" height="31" rx="5"/><rect x="143" y="132" width="36" height="36" rx="6"/>
+    <rect x="139" y="216" width="47" height="47" rx="7"/><rect x="97" y="292" width="36" height="36" rx="6"/>
+    <rect x="216" y="198" width="112" height="25" rx="12.5"/><rect x="216" y="246" width="132" height="25" rx="12.5"/>
+    <rect x="216" y="294" width="105" height="25" rx="12.5"/>
+  </g>
+</svg>

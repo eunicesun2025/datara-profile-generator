@@ -122,10 +122,15 @@ def register_optimizer_routes(app: FastAPI, store: Store, tasks: dict):
     def import_existing_prompt(profile_id: str, body: PromptImportRequest):
         profile = store.load(profile_id)
         version = import_prompt_version(store, profile, body.prompt_text, body.expected_profile_revision)
-        return {k: version.get(k) for k in (
+        response = {k: version.get(k) for k in (
             "id", "version_number", "origin", "lifecycle", "prompt_source", "profile_revision",
             "prompt_language", "prompt_hash", "created_at",
         )}
+        response.update({k: version.get(k) for k in (
+            "profile", "mapped_field_ids", "updated_field_ids", "unmapped_field_ids",
+            "rejected_field_ids",
+        )})
+        return response
 
     @app.get("/api/prompt-versions/compare")
     def compare_prompt_versions(from_id: str, to_id: str):

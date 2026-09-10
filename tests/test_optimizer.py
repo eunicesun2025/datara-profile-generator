@@ -9,12 +9,12 @@ from fastapi.testclient import TestClient
 from PIL import Image
 
 from datara.app import create_app
-from datara.domain import FieldDef, TableDef, new_profile, normalize
+from datara.domain import FieldDef, TableDef, new_profile, normalize, validate_profile
 from datara.evaluation import compare_values, evaluate_output
 from datara.generators import profile_with_field_rules, prompt_components
 from datara.optimizer import (IMPORTED_OVERRIDE_MARKER, PromptOptimizerService,
                               candidate_uses_language, create_run_record, ensure_prompt_version,
-                              import_prompt_version, prompt_language)
+                              import_prompt_version, imported_prompt_field_rules, prompt_language)
 from datara.optimizer_models import CandidateResponse, ComparisonPolicy, OptimizationRunCreate
 from datara.provider import Connection
 from datara.storage import Store
@@ -28,6 +28,18 @@ def image_bytes(color="white"):
 
 def test_exact_and_normalized_comparisons():
     assert not compare_values("HKD", "hkd", "String", ComparisonPolicy(mode="exact"))["matched"]
+    insensitive = compare_values(
+        "Linde (China) investment Co., Ltd. ",
+        "Linde (China) Investment Co., Ltd.",
+        "String", ComparisonPolicy(mode="case_insensitive"),
+    )
+    assert insensitive["matched"]
+    assert insensitive["normalized_expected"] == "linde (china) investment co., ltd."
+    assert not compare_values(
+        "Linde (China) Investment Co., Ltd.",
+        "Linde China Investment Co Ltd",
+        "String", ComparisonPolicy(mode="case_insensitive"),
+    )["matched"]
     assert compare_values("2026-09-01", "01/09/2026", "Date",
                           ComparisonPolicy(mode="normalized", date_order="DMY"))["matched"]
     assert compare_values("1,000.00", 1000, "Decimal",
@@ -41,6 +53,107 @@ def test_prompt_language_detection_and_candidate_guard():
     assert prompt_language("Extract the complete buyer company name from the invoice header.") == "en"
     assert candidate_uses_language("优先读取 BILL TO 标签后的完整公司名称。", "zh-CN")
     assert not candidate_uses_language("Extract the issuer company from the header.", "zh-CN")
+
+
+def test_published_prompt_rules_are_mapped_to_profile_fields_without_absorbing_next_section(tmp_path):
+    store = Store(tmp_path)
+    profile = new_profile("Published rules")
+    company = FieldDef(name="company_name")
+    invoice = FieldDef(name="invoice_number")
+    profile.tables[0].fields[:0] = [company, invoice]
+    profile = store.save(profile)
+    published = """发票提取规则，请返回严格 JSON。
+
+1. 公司名称 (company_name)
+识别 Bill To 后的完整购买方名称。
+- 排除供应商和页眉 Logo。
+
+2. 供应商名称 (vendor_name)
+识别发票开具方；不要当作购买方。
+
+3. 发票号码 (invoice_number)
+提取 Invoice No. 后的完整字符串。
+
+提取明细行项目（数组结构）：
+以下是其他表的规则。
+"""
+
+    rules = imported_prompt_field_rules(profile, published)
+    assert rules[company.id] == "识别 Bill To 后的完整购买方名称。\n- 排除供应商和页眉 Logo。"
+    assert "识别发票开具方" not in rules[company.id]
+    assert rules[invoice.id] == "提取 Invoice No. 后的完整字符串。"
+
+    imported = import_prompt_version(store, profile, published, profile.revision)
+    assert set(imported["mapped_field_ids"]) == {company.id, invoice.id}
+    assert set(imported["updated_field_ids"]) == {company.id, invoice.id}
+    assert imported["profile"]["revision"] == profile.revision + 1
+    saved = store.load(profile.id)
+    saved_rules = {field.id: field.extraction for field in saved.tables[0].fields}
+    assert saved_rules[company.id] == rules[company.id]
+    assert next(field for field in imported["field_rules"]
+                if field["field_id"] == company.id)["extraction_rule"] == rules[company.id]
+
+
+def test_imported_baseline_cannot_silently_optimize_an_unmapped_empty_rule(tmp_path):
+    store = Store(tmp_path)
+    profile = new_profile("Unmapped published rules")
+    company = FieldDef(name="company_name")
+    profile.tables[0].fields.insert(0, company)
+    normalize(profile)
+    profile = store.save(profile)
+    imported = import_prompt_version(
+        store, profile, "这是完整的线上提示词，但没有可明确解析的字段标题或独立字段规则。", profile.revision)
+    body = OptimizationRunCreate(
+        profile_id=profile.id, profile_revision=profile.revision,
+        baseline_prompt_version_id=imported["id"], selected_field_ids=[company.id],
+        failure_test_case_ids=["not-reached"],
+    )
+    with pytest.raises(ValueError, match="尚未同步到 Profile"):
+        create_run_record(store, body)
+
+
+def test_imported_rule_that_breaks_profile_validation_is_reported_but_not_saved(tmp_path):
+    store = Store(tmp_path)
+    profile = new_profile("Legacy defaults")
+    amount = FieldDef(name="tax_amount", data_type="Decimal")
+    profile.tables[0].fields.insert(0, amount)
+    normalize(profile)
+    profile = store.save(profile)
+    imported = import_prompt_version(
+        store, profile,
+        "这是完整的线上发票提示词。\n\ntax_amount:\n如果找不到税额，默认返回 0。",
+        profile.revision,
+    )
+    assert imported["mapped_field_ids"] == []
+    assert imported["rejected_field_ids"] == [amount.id]
+    assert amount.id in imported["unmapped_field_ids"]
+    saved = store.load(profile.id)
+    assert next(field for field in saved.tables[0].fields if field.id == amount.id).extraction == ""
+    assert validate_profile(saved)["errors"] == []
+
+
+def test_reimport_repairs_an_invalid_rule_saved_by_an_older_importer(tmp_path):
+    store = Store(tmp_path)
+    profile = new_profile("Polluted legacy import")
+    amount = FieldDef(
+        name="tax_amount", data_type="Decimal", extraction="如果找不到税额，默认返回 0。")
+    profile.tables[0].fields.insert(0, amount)
+    normalize(profile)
+    profile = store.save(profile)
+    assert validate_profile(profile)["errors"]
+
+    imported = import_prompt_version(
+        store, profile,
+        "这是完整的线上发票提示词。\n\ntax_amount:\n如果找不到税额，默认返回 0。",
+        profile.revision,
+    )
+
+    assert imported["mapped_field_ids"] == []
+    assert imported["rejected_field_ids"] == [amount.id]
+    assert imported["updated_field_ids"] == [amount.id]
+    saved = store.load(profile.id)
+    assert next(field for field in saved.tables[0].fields if field.id == amount.id).extraction == ""
+    assert validate_profile(saved)["errors"] == []
 
 
 def test_candidate_retries_when_rule_language_differs_from_imported_prompt(tmp_path, monkeypatch):

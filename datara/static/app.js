@@ -22,7 +22,18 @@ async function api(path, body, options = {}) {
   }
   return options.blob ? response.blob() : response.json();
 }
-function toast(message) { $('#toast').textContent = message; $('#toast').classList.add('visible'); clearTimeout(toastTimer); toastTimer = setTimeout(() => $('#toast').classList.remove('visible'), 5500); }
+function toast(message,type='info') {
+  const el=$('#toast');el.textContent=message||'发生未知错误';
+  el.classList.toggle('toast-error',type==='error');el.classList.toggle('toast-warning',type==='warning');
+  if(typeof el.showPopover==='function'){
+    // Reinsert an already-open popover so it is newer than any dialog in the browser's
+    // Top Layer. Otherwise a modal opened after the previous toast can cover a new error.
+    if(el.matches(':popover-open'))el.hidePopover();
+    el.showPopover();
+  }
+  el.classList.add('visible');clearTimeout(toastTimer);
+  toastTimer=setTimeout(()=>{el.classList.remove('visible');if(typeof el.hidePopover==='function'&&el.matches(':popover-open'))el.hidePopover();},type==='error'?12000:6500);
+}
 function currentTable() { return state.profile?.tables.find(t => t.id === state.tableId) || state.profile?.tables[0]; }
 function isSystem(f) { return Object.hasOwn(state.meta.system, f.name); }
 function dirty() { state.dirty = true; state.preview = null; updateSaveState(); clearTimeout(previewTimer); previewTimer = setTimeout(refreshPreview, 600); }
@@ -43,8 +54,8 @@ async function loadProfile(p, view='fields', navigate=true) {
   state.analysis=null; state.references=[];
   state.optimizer={cases:[],versions:[],activeVersionId:null,selected:new Set(),policies:{},run:null,iterations:[],
     maxIterations:3,minImprovement:0.01,maxRegressionDrop:0,noImprovementLimit:2,reuseBaseline:true};
-  for(const id of p.reference_ids) {try{state.references.push(await api('/references/'+id));}catch(e){toast(e.message);}}
-  if(p.sample_ids?.length) { try {state.sample=await api('/samples/'+p.sample_ids.at(-1)); state.page=1;} catch(e){toast(e.message);} }
+  for(const id of p.reference_ids) {try{state.references.push(await api('/references/'+id));}catch(e){toast(e.message,'error');}}
+  if(p.sample_ids?.length) { try {state.sample=await api('/samples/'+p.sample_ids.at(-1)); state.page=1;} catch(e){toast(e.message,'error');} }
   if(p.revision) state.history=await api('/profiles/'+p.id+'/tests');
   if(navigate)pushRoute();render(); refreshPreview(); if(view==='optimizer')await loadOptimizer();
 }
@@ -154,7 +165,7 @@ async function refreshPreview() {
     if(state.view==='fields' && $('#field-issues')) $('#field-issues').innerHTML=issuesHTML(result);
     if(state.view==='test') renderTest();
     installPanelControls();
-  } catch(e){toast(e.message);}
+  } catch(e){toast(e.message,'error');}
 }
 function renderPreview() {
   const pv=state.preview;
@@ -239,11 +250,11 @@ function renderOptimizer() {
       <div class="optimizer-kpi tone-teal"><span class="optimizer-kpi-icon">#</span><div><small>优化范围</small><strong>${o.selected.size}<em> / ${aiFields.length}</em></strong></div></div>
     </div>
     <section class="panel optimizer-panel optimizer-baseline-panel">
-      <div class="panel-content optimizer-baseline-content"><div class="optimizer-baseline-icon">00</div><div class="optimizer-baseline-copy"><span>第一步：确认优化从哪一版提示词开始</span><h3>${imported?'正在使用你导入的已发布提示词':'当前使用系统根据 Profile 生成的提示词'}</h3><p>${imported?`基线测试和错误分析都会使用提示词全文；识别为${promptLanguage}，新规则必须保持相同语言。`:'如果线上已经有一套提示词，请先粘贴或上传 TXT；否则优化结果可能与线上版本不是同一起点。'}</p></div><div class="optimizer-baseline-actions"><button class="small ghost" data-action="view-prompt-version" data-id="${active?.id||''}" ${active?'':'disabled'}>查看当前提示词全文</button><button class="primary" data-action="import-existing-prompt">${imported?'替换已发布提示词':'导入已发布提示词'}</button></div></div>
+      <div class="panel-content optimizer-baseline-content"><div class="optimizer-baseline-icon">00</div><div class="optimizer-baseline-copy"><span>第一步：确认优化从哪一版提示词开始</span><h3>${imported?'正在使用你导入的已发布提示词':'当前使用系统根据 Profile 生成的提示词'}</h3><p>${imported?`基线测试使用提示词全文；已明确识别的字段规则会同步到 Profile，候选优化从这些旧规则继续。识别为${promptLanguage}。`:'如果线上已经有一套提示词，请先粘贴或上传 TXT；否则优化结果可能与线上版本不是同一起点。'}</p></div><div class="optimizer-baseline-actions"><button class="small ghost" data-action="view-prompt-version" data-id="${active?.id||''}" ${active?'':'disabled'}>查看当前提示词全文</button><button class="primary" data-action="import-existing-prompt">${imported?'替换已发布提示词':'导入已发布提示词'}</button></div></div>
     </section>
     <section class="panel optimizer-panel optimizer-fields-panel">
       <div class="panel-head optimizer-panel-head"><div class="optimizer-section-title"><span>01</span><div><h3>选择这次要调整的字段</h3><p>只有勾选的字段规则会改变；其他字段保持原样。</p></div></div><span class="optimizer-selection-count">${selectedLabel}</span></div>
-      <div class="panel-content optimizer-field-grid">${aiFields.map(f=>{const policy=o.policies[f.id]||((['Date','Integer','Decimal'].includes(f.data_type))?'normalized':'exact');const ruleLabel=imported?'Profile 字段规则（实际以导入全文为准）':'当前字段规则';const ruleText=f.extraction||(imported?'未单独维护；系统会读取上方导入的完整提示词。':'（空）');return `<article class="optimizer-field-card ${o.selected.has(f.id)?'is-selected':''}"><label class="optimizer-field-heading"><input type="checkbox" data-opt-field="${f.id}" ${o.selected.has(f.id)?'checked':''}><span><strong>${esc(f.name)}</strong><small>${esc(f.table_name)}</small></span><b>${esc(f.data_type)}</b></label><p class="optimizer-field-description">${esc(f.description||'未填写字段说明')}</p><div class="optimizer-rule-preview"><span>${ruleLabel}</span><p>${esc(ruleText)}</p></div><label class="optimizer-policy"><span>答案如何比较</span><select data-opt-policy="${f.id}"><option value="exact" ${policy==='exact'?'selected':''}>必须完全一致</option><option value="normalized" ${policy==='normalized'?'selected':''}>忽略日期/金额格式</option>${f.data_type==='String'?`<option value="semantic" ${policy==='semantic'?'selected':''}>文字含义相近即可</option>`:''}</select></label></article>`}).join('')}</div>
+      <div class="panel-content optimizer-field-grid">${aiFields.map(f=>{const policy=o.policies[f.id]||((['Date','Integer','Decimal'].includes(f.data_type))?'normalized':'exact');const missingImportedRule=imported&&!f.extraction?.trim();const ruleLabel=imported?(missingImportedRule?'未同步到 Profile · 需要处理':'从已发布提示词同步的旧规则'):'当前字段规则';const ruleText=f.extraction||(imported?'没有识别到明确字段标题。重新导入规范提示词，或到字段详情补充规则后再优化。':'（空）');return `<article class="optimizer-field-card ${o.selected.has(f.id)?'is-selected':''} ${missingImportedRule?'has-rule-error':''}"><label class="optimizer-field-heading"><input type="checkbox" data-opt-field="${f.id}" ${o.selected.has(f.id)?'checked':''}><span><strong>${esc(f.name)}</strong><small>${esc(f.table_name)}</small></span><b>${esc(f.data_type)}</b></label><p class="optimizer-field-description">${esc(f.description||'未填写字段说明')}</p><div class="optimizer-rule-preview"><span>${ruleLabel}</span><p>${esc(ruleText)}</p></div><label class="optimizer-policy"><span>答案如何比较</span><select data-opt-policy="${f.id}"><option value="exact" ${policy==='exact'?'selected':''}>必须完全一致</option>${f.data_type==='String'?`<option value="case_insensitive" ${policy==='case_insensitive'?'selected':''}>忽略大小写与首尾空格</option>`:''}<option value="normalized" ${policy==='normalized'?'selected':''}>忽略日期/金额格式</option>${f.data_type==='String'?`<option value="semantic" ${policy==='semantic'?'selected':''}>文字含义相近即可</option>`:''}</select></label></article>`}).join('')}</div>
     </section>
     <div class="optimizer-datasets">
       <section class="panel optimizer-panel optimizer-dataset failure-dataset"><div class="panel-head optimizer-panel-head"><div class="optimizer-section-title"><span>02</span><div><h3>待修复案例 <small>Failure Set</small></h3><p>当前提取错误、希望新规则修好的文档。</p></div></div><button class="small" data-action="add-optimizer-case" data-role="failure">＋ 添加待修复案例</button></div><div class="panel-content">${optimizerCaseList('failure')}</div></section>
@@ -330,12 +341,12 @@ async function pollJob(id) {
     state.job=r;
     if(r.status==='running'){pollTimer=setTimeout(()=>pollJob(id),1500);return;}
     state.history=[r,...state.history.filter(x=>x.id!==id)].slice(0,10);render();
-    if(r.status==='failed'||r.status==='cancelled'){toast(r.error);return;}
+    if(r.status==='failed'||r.status==='cancelled'){toast(r.error,r.status==='failed'?'error':'warning');return;}
     if(r.kind==='draft'&&r.status==='completed') {
       state.suggestions=r.suggestions||[];
       state.analysis=r; analysisDialog();
     }
-  }catch(e){toast(e.message);pollTimer=setTimeout(()=>pollJob(id),4000);}
+  }catch(e){toast(e.message,'error');pollTimer=setTimeout(()=>pollJob(id),4000);}
 }
 async function pollOptimizer(id) {
   try {
@@ -346,8 +357,8 @@ async function pollOptimizer(id) {
     state.optimizer.iterations=await api('/optimizer/runs/'+id+'/iterations');
     const versions=await api('/profiles/'+state.profile.id+'/prompt-versions');
     state.optimizer.versions=versions.versions;state.optimizer.activeVersionId=versions.active_prompt_version_id;render();
-    toast(run.status==='completed'?(run.promotion_eligible?'优化完成并通过最终验证':'优化完成，请查看结果'):'优化任务'+run.status);
-  }catch(e){toast(e.message);pollTimer=setTimeout(()=>pollOptimizer(id),4000);}
+    toast(run.status==='completed'?(run.promotion_eligible?'优化完成并通过最终验证':'优化完成，请查看结果'):'优化任务'+run.status,run.status==='failed'?'error':'info');
+  }catch(e){toast(e.message,'error');pollTimer=setTimeout(()=>pollOptimizer(id),4000);}
 }
 
 function analysisDialog() {
@@ -419,7 +430,7 @@ const actions={
   'delete-table':()=>{if(!confirm('删除此子表及其全部字段？'))return;state.profile.tables=state.profile.tables.filter(t=>t.id!==state.tableId);state.tableId=state.profile.tables[0].id;dirty();closeModal();render();},
   'apply-import':async()=>{const cols={};for(const k of ['name','description','type','source'])if($('#i-'+k)?.value)cols[k]=$('#i-'+k).value;const r=await api('/import/apply',{import_id:state.importData.import_id,sheet:$('#i-sheet').value,columns:Object.keys(cols).length?cols:null,repair_structure:!!$('#i-repair')?.checked});r.profile.name=state.importData.filename?.replace(/\.xlsx$/i,'')||'导入的 Profile';const saved=await api('/profiles/save',r.profile);closeModal();await loadProfile(saved);state.importNotes=r.notes;render();toast('已导入并保存新 Profile；请审核导入说明和字段规则');},
   'save-settings':async()=>{await persistSettings();closeModal();render();toast('模型设置已保存，密钥仅保留在本次服务运行中');},
-  'test-connection':async()=>{await persistSettings();$('#connection-test-result').textContent='正在测试连接…';try{const r=await api('/settings/test',{});$('#connection-test-result').textContent=r.message;}catch(e){$('#connection-test-result').textContent=e.message;}},
+  'test-connection':async()=>{await persistSettings();$('#connection-test-result').textContent='正在测试连接…';try{const r=await api('/settings/test',{});$('#connection-test-result').textContent=r.message;}catch(e){$('#connection-test-result').textContent=e.message;toast(e.message,'error');}},
   'clear-key':async()=>{state.settings=await api('/settings',{...Object.fromEntries(Object.entries(state.settings).filter(([k])=>k!=='has_key')),clear_key:true});await settingsDialog();},
   draft:()=>{if(!state.sample)throw Error('请先上传或拖入样张');modal('AI 分析样张与文件',`<div class="notice">当前样张：${esc(state.sample.name)} · ${state.sample.pages} 页<br>参考文件：${state.references.length?state.references.map(r=>esc(r.name)).join('、'):'尚未上传，可先在左侧添加'}<br>AI 将建议单据类型、字段类型、HeadDisplay、具体定位与提取规则，并检查已有 AI 字段。</div><div class="form-group"><label class="form-label" for="draft-request">补充需求（可选）</label><textarea id="draft-request" placeholder="例如：区分付款方与收款方，识别日期、币种、金额；请参考上传的字段说明完善提取规则。"></textarea><p class="helper">本次发送上方列出的样张及参考文件。分析完成后可逐项选择应用。需要明细字段时请先创建对应子表。</p></div>`, '<button class="primary" data-action="run-draft">开始分析</button>');},
   'run-draft':async()=>{const v=$('#draft-request').value;closeModal();await startJob('draft',v);},
@@ -432,14 +443,16 @@ const actions={
     if(active?.prompt_source==='imported'){
       const full=await api('/prompt-versions/'+active.id);initial=full.imported_prompt_base||full.rendered_prompt;
     }
-    modal('导入当前线上使用的提示词',`<div class="notice"><strong>这一步不会立刻修改 Profile。</strong><br>导入内容会作为优化前的基线原样测试。候选版本只会在末尾追加你所选字段的覆盖规则。请确认提示词里的表名、字段名与当前 Profile 一致。</div><div class="form-group"><div class="optimizer-prompt-label"><label class="form-label" for="optimizer-existing-prompt">完整提示词</label><button class="small ghost" data-action="choose-prompt-file">从 TXT 文件读取</button></div><textarea id="optimizer-existing-prompt" class="w-full optimizer-prompt-textarea" placeholder="把当前生产环境正在使用的完整提示词粘贴到这里…">${esc(initial)}</textarea><p id="optimizer-prompt-file-name" class="helper">支持直接粘贴，或选择 .txt / .md 文件。至少 20 个字符。</p></div>`, '<button class="primary" data-action="save-imported-prompt">设为本次优化基线</button>');
+    modal('导入当前线上使用的提示词',`<div class="notice"><strong>完整提示词会原样作为 Baseline。</strong><br>系统还会把能明确匹配到 AI 字段名的规则同步回 Profile，让优化器拿到真实旧规则；无法可靠匹配的字段会明确提示，不会静默用空规则运行。请确认提示词里的表名、字段名与当前 Profile 一致。</div><div class="form-group"><div class="optimizer-prompt-label"><label class="form-label" for="optimizer-existing-prompt">完整提示词</label><button class="small ghost" data-action="choose-prompt-file">从 TXT 文件读取</button></div><textarea id="optimizer-existing-prompt" class="w-full optimizer-prompt-textarea" placeholder="把当前生产环境正在使用的完整提示词粘贴到这里…">${esc(initial)}</textarea><p id="optimizer-prompt-file-name" class="helper">支持直接粘贴，或选择 .txt / .md 文件。字段标题推荐写成“公司名称 (company_name)”或“company_name:”。</p></div>`, '<button class="primary" data-action="save-imported-prompt">同步字段规则并设为基线</button>');
   },
   'choose-prompt-file':()=>$('#optimizer-prompt-upload').click(),
   'save-imported-prompt':async()=>{
     const text=$('#optimizer-existing-prompt').value.trim();if(text.length<20)throw Error('请粘贴完整的现有提示词');
     if(state.dirty)await save();
-    await api('/profiles/'+state.profile.id+'/prompt-versions/import',{expected_profile_revision:state.profile.revision,prompt_text:text});
-    closeModal();await loadOptimizer();toast('现有提示词已设为优化基线');
+    const result=await api('/profiles/'+state.profile.id+'/prompt-versions/import',{expected_profile_revision:state.profile.revision,prompt_text:text});
+    state.profile=result.profile;state.dirty=false;closeModal();await loadOptimizer();
+    const mapped=result.mapped_field_ids?.length||0,unmapped=result.unmapped_field_ids?.length||0,rejected=result.rejected_field_ids?.length||0;
+    toast(`已发布提示词已设为基线；同步 ${mapped} 个字段规则${unmapped?`，${unmapped} 个字段未同步${rejected?`（其中 ${rejected} 个与当前规范冲突）`:''}`:''}`,unmapped?'warning':'info');
   },
   'add-optimizer-case':el=>{if(el.dataset.role==='failure'&&!state.optimizer.selected.size)throw Error('请先勾选要优化的字段，再上传待修复案例');state.optimizer.uploadRole=el.dataset.role;$('#optimizer-upload').click();},
   'create-optimizer-case':async()=>{
@@ -454,6 +467,11 @@ const actions={
   'run-optimizer':async()=>{
     if(state.dirty)await save();if(!state.settings?.has_key){await settingsDialog();throw Error('请先配置模型 API Key');}
     const active=state.optimizer.activeVersionId,selected=[...state.optimizer.selected];
+    const activeVersion=state.optimizer.versions.find(v=>v.id===active);
+    if(activeVersion?.prompt_source==='imported'){
+      const missing=state.profile.tables.flatMap(t=>t.fields.filter(f=>selected.includes(f.id)&&!f.extraction?.trim()).map(f=>`${t.name}.${f.name}`));
+      if(missing.length)throw Error('以下字段没有从已发布提示词同步到旧规则：'+missing.join('、')+'。请重新导入规范提示词，或先在字段详情中补充提取规则。');
+    }
     const policies={};for(const id of selected){const f=state.profile.tables.flatMap(t=>t.fields).find(f=>f.id===id),mode=state.optimizer.policies[id]||(['Date','Integer','Decimal'].includes(f.data_type)?'normalized':'exact');policies[id]={mode};if(f.data_type==='Date'&&mode==='normalized')policies[id].date_order='DMY';}
     const body={profile_id:state.profile.id,profile_revision:state.profile.revision,baseline_prompt_version_id:active,selected_field_ids:selected,failure_test_case_ids:state.optimizer.cases.filter(c=>c.enabled&&c.dataset_role==='failure').map(c=>c.id),regression_test_case_ids:state.optimizer.cases.filter(c=>c.enabled&&c.dataset_role==='regression').map(c=>c.id),evaluation_policies:policies,settings:{max_iterations:Number($('#opt-max').value),no_improvement_limit:Number($('#opt-plateau').value),minimum_improvement:Number($('#opt-min').value)/100,max_regression_drop:Number($('#opt-regression').value)/100,early_stop_enabled:true,target_accuracy:1,final_validation_rerun:true,reuse_baseline_results:$('#opt-cache').checked}};
     state.optimizer.maxIterations=body.settings.max_iterations;state.optimizer.noImprovementLimit=body.settings.no_improvement_limit;state.optimizer.minImprovement=body.settings.minimum_improvement;state.optimizer.maxRegressionDrop=body.settings.max_regression_drop;state.optimizer.reuseBaseline=body.settings.reuse_baseline_results;
@@ -482,7 +500,7 @@ document.addEventListener('click',async event=>{
   const el=event.target.closest('[data-action]'); if(!el||el.disabled)return;
   const action=actions[el.dataset.action];if(!action)return;
   const hadDisabled=el.hasAttribute('disabled');el.disabled=true;
-  try{await action(el);}catch(e){toast(e.message);}finally{if(!hadDisabled)el.disabled=false;}
+  try{await action(el);}catch(e){toast(e.message,'error');}finally{if(!hadDisabled)el.disabled=false;}
 });
 document.addEventListener('input',event=>{
   const el=event.target;
@@ -512,26 +530,26 @@ document.addEventListener('drop',event=>{const row=event.target.closest('[data-f
 document.addEventListener('keydown',event=>{if(event.key==='Enter'&&event.target.matches('.sample-drop'))$('#sample-upload').click();});
 $('#sample-upload').addEventListener('change',async event=>{
   const file=event.target.files[0];if(!file)return;
-  try{await uploadSampleFile(file);}catch(e){toast(e.message);}finally{event.target.value='';}
+  try{await uploadSampleFile(file);}catch(e){toast(e.message,'error');}finally{event.target.value='';}
 });
-$('#reference-upload').addEventListener('change',async event=>{try{await uploadReferences([...event.target.files]);}catch(e){toast(e.message);}finally{event.target.value='';}});
+$('#reference-upload').addEventListener('change',async event=>{try{await uploadReferences([...event.target.files]);}catch(e){toast(e.message,'error');}finally{event.target.value='';}});
 $('#optimizer-upload').addEventListener('change',async event=>{
   const file=event.target.files[0];if(!file)return;const data=new FormData();data.append('file',file);
-  try{const sample=await api('/samples',data);state.optimizer.pendingSample=sample;const role=state.optimizer.uploadRole,template=optimizerTruthTemplate(role),label=role==='failure'?'待修复案例':'保护案例';modal('填写正确答案 · '+label,`<div class="optimizer-case-dialog"><div class="optimizer-case-preview"><img src="/api/samples/${sample.id}/pages/1" alt="${esc(file.name)} 第 1 页"><span>${esc(file.name)} · ${sample.pages} 页</span></div><div><div class="form-group"><label class="form-label" for="optimizer-case-name">案例名称</label><input id="optimizer-case-name" value="${esc(file.name)}"></div><div class="notice"><strong>${role==='failure'?'只需填写这次要修复的字段。':'请填写所有 AI 字段。'}</strong><br>${role==='failure'?'系统已按你勾选的字段生成模板，把 null 改成正确答案即可。':'这些答案用来确认新规则没有破坏原本正确的结果。'}</div><div class="form-group"><label class="form-label" for="optimizer-ground-truth">人工确认的正确答案（JSON）</label><textarea id="optimizer-ground-truth" class="w-full optimizer-ground-truth">${esc(json(template))}</textarea></div></div></div>`,'<button class="primary" data-action="create-optimizer-case">保存这个案例</button>');}catch(e){toast(e.message);}finally{event.target.value='';}
+  try{const sample=await api('/samples',data);state.optimizer.pendingSample=sample;const role=state.optimizer.uploadRole,template=optimizerTruthTemplate(role),label=role==='failure'?'待修复案例':'保护案例';modal('填写正确答案 · '+label,`<div class="optimizer-case-dialog"><div class="optimizer-case-preview"><img src="/api/samples/${sample.id}/pages/1" alt="${esc(file.name)} 第 1 页"><span>${esc(file.name)} · ${sample.pages} 页</span></div><div><div class="form-group"><label class="form-label" for="optimizer-case-name">案例名称</label><input id="optimizer-case-name" value="${esc(file.name)}"></div><div class="notice"><strong>${role==='failure'?'只需填写这次要修复的字段。':'请填写所有 AI 字段。'}</strong><br>${role==='failure'?'系统已按你勾选的字段生成模板，把 null 改成正确答案即可。':'这些答案用来确认新规则没有破坏原本正确的结果。'}</div><div class="form-group"><label class="form-label" for="optimizer-ground-truth">人工确认的正确答案（JSON）</label><textarea id="optimizer-ground-truth" class="w-full optimizer-ground-truth">${esc(json(template))}</textarea></div></div></div>`,'<button class="primary" data-action="create-optimizer-case">保存这个案例</button>');}catch(e){toast(e.message,'error');}finally{event.target.value='';}
 });
 $('#optimizer-prompt-upload').addEventListener('change',async event=>{
   const file=event.target.files[0];if(!file)return;
-  try{const text=await file.text();if(text.length>100000)throw Error('提示词文件超过 100,000 个字符');const area=$('#optimizer-existing-prompt');if(!area)throw Error('请重新打开导入提示词窗口');area.value=text;const note=$('#optimizer-prompt-file-name');if(note)note.textContent=`已读取 ${file.name} · ${text.length} 个字符`;}catch(e){toast(e.message);}finally{event.target.value='';}
+  try{const text=await file.text();if(text.length>100000)throw Error('提示词文件超过 100,000 个字符');const area=$('#optimizer-existing-prompt');if(!area)throw Error('请重新打开导入提示词窗口');area.value=text;const note=$('#optimizer-prompt-file-name');if(note)note.textContent=`已读取 ${file.name} · ${text.length} 个字符`;}catch(e){toast(e.message,'error');}finally{event.target.value='';}
 });
 document.addEventListener('dragover',event=>{if(!event.dataTransfer?.types.includes('Files'))return;event.preventDefault();const zone=event.target.closest('[data-drop]');if(zone)zone.classList.add('drag-active');});
 document.addEventListener('dragleave',event=>{const zone=event.target.closest('[data-drop]');if(zone&&!zone.contains(event.relatedTarget))zone.classList.remove('drag-active');});
-document.addEventListener('drop',async event=>{if(!event.dataTransfer?.files.length)return;event.preventDefault();$$('.drag-active').forEach(el=>el.classList.remove('drag-active'));const zone=event.target.closest('[data-drop]');if(!zone)return;try{const files=[...event.dataTransfer.files];if(zone.dataset.drop==='reference')await uploadReferences(files);else {if(files.length!==1)throw Error('每次请拖入一份样张；多页请合并为 PDF');await uploadSampleFile(files[0]);}}catch(e){toast(e.message);}});
-document.addEventListener('focusout',async event=>{if(event.target.dataset.field!=='name')return;const snapshot=json(state.profile);try{const r=await api('/normalize',state.profile);if(!state.profile||json(state.profile)!==snapshot)return;if(r.notes.length){state.profile=r.profile;dirty();render();toast(r.notes.join('；'));}}catch(e){toast(e.message);}});
+document.addEventListener('drop',async event=>{if(!event.dataTransfer?.files.length)return;event.preventDefault();$$('.drag-active').forEach(el=>el.classList.remove('drag-active'));const zone=event.target.closest('[data-drop]');if(!zone)return;try{const files=[...event.dataTransfer.files];if(zone.dataset.drop==='reference')await uploadReferences(files);else {if(files.length!==1)throw Error('每次请拖入一份样张；多页请合并为 PDF');await uploadSampleFile(files[0]);}}catch(e){toast(e.message,'error');}});
+document.addEventListener('focusout',async event=>{if(event.target.dataset.field!=='name')return;const snapshot=json(state.profile);try{const r=await api('/normalize',state.profile);if(!state.profile||json(state.profile)!==snapshot)return;if(r.notes.length){state.profile=r.profile;dirty();render();toast(r.notes.join('；'));}}catch(e){toast(e.message,'error');}});
 document.body.classList.toggle('sidebar-collapsed',localStorage.getItem('datara-sidebar-collapsed')==='true');
 $('#excel-upload').addEventListener('change',async event=>{
   const file=event.target.files[0];if(!file)return;const data=new FormData();data.append('file',file);
-  try{state.importData=await api('/import/inspect',data);state.importData.filename=file.name;importDialog();}catch(e){toast(e.message);}finally{event.target.value='';}
+  try{state.importData=await api('/import/inspect',data);state.importData.filename=file.name;importDialog();}catch(e){toast(e.message,'error');}finally{event.target.value='';}
 });
 window.addEventListener('beforeunload',event=>{if(state.dirty){event.preventDefault();event.returnValue='';}});
-window.addEventListener('popstate',async()=>{try{if(state.dirty)await save();await restoreRoute();}catch(e){pushRoute();toast(e.message);}});
-(async()=>{try{[state.meta,state.settings,state.profiles]=await Promise.all([api('/meta'),api('/settings'),api('/profiles')]);if(!location.hash)window.history.replaceState(null,'','#home');await restoreRoute();}catch(e){$('#main').innerHTML=`<div class="notice error">页面未能打开：${esc(e.message)} <button data-action="home">返回我的 Profiles</button></div>`;}})();
+window.addEventListener('popstate',async()=>{try{if(state.dirty)await save();await restoreRoute();}catch(e){pushRoute();toast(e.message,'error');}});
+(async()=>{try{[state.meta,state.settings,state.profiles]=await Promise.all([api('/meta'),api('/settings'),api('/profiles')]);if(!location.hash)window.history.replaceState(null,'','#home');await restoreRoute();}catch(e){$('#main').innerHTML=`<div class="notice error">页面未能打开：${esc(e.message)} <button data-action="home">返回我的 Profiles</button></div>`;toast(e.message,'error');}})();

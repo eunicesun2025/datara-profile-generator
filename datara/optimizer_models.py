@@ -8,7 +8,7 @@ from .domain import Model
 
 
 class ComparisonPolicy(Model):
-    mode: Literal["exact", "normalized", "semantic"] = "exact"
+    mode: Literal["exact", "case_insensitive", "normalized", "semantic"] = "exact"
     date_order: Literal["YMD", "DMY", "MDY"] | None = None
     grouping_separators: list[str] = Field(default_factory=lambda: [",", " ", "\u00a0"], max_length=5)
     currency_tokens: list[str] = Field(default_factory=list, max_length=10)

@@ -88,7 +88,14 @@ def compare_values(expected: Any, actual: Any, data_type: str,
         result["reason"] = "matched" if result["matched"] else "exact_mismatch"
         return result
     try:
-        if policy.mode == "semantic":
+        if policy.mode == "case_insensitive":
+            if data_type != "String":
+                raise ValueError("case-insensitive comparison is only valid for String fields")
+            # Keep internal whitespace, punctuation, parentheses and suffixes exact.
+            # Only case and accidental leading/trailing whitespace are ignored.
+            left = unicodedata.normalize("NFKC", str(expected)).strip().casefold()
+            right = unicodedata.normalize("NFKC", str(actual)).strip().casefold()
+        elif policy.mode == "semantic":
             if data_type != "String":
                 raise ValueError("semantic comparison is only valid for String fields")
             left, right = _company_name(expected), _company_name(actual)

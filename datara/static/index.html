@@ -2,14 +2,14 @@
 <html lang="zh-CN">
 <head>
   <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-    <meta name="theme-color" content="#102b50"><title>Datara Profile Generator</title>
-    <link rel="icon" href="/static/datara-logo.jpg" type="image/jpeg">
+    <meta name="theme-color" content="#0B0F2B"><title>Datara Profile Generator</title>
+    <link rel="icon" href="/static/favicon.svg" type="image/svg+xml" sizes="any">
   <link rel="stylesheet" href="/static/style.css">
   <script src="/static/app.js" defer></script>
 </head>
 <body>
   <aside class="sidebar">
-    <a class="brand" href="/" aria-label="Datara 首页"><span class="logo-window"><img src="/static/datara-logo.jpg" alt="DATARA"></span><small>PROFILE GENERATOR</small></a>
+    <a class="brand" href="/" aria-label="Datara 首页"><img class="brand-logo" src="/static/datara-logo.svg" alt="DATARA"><img class="brand-mark" src="/static/datara-app-icon.svg" alt=""><small>PROFILE GENERATOR</small></a>
     <div class="workspace-label">本地工作空间</div>
     <button class="nav-item active" data-action="home"><span>▦</span> 我的 Profiles</button>
     <button class="nav-item" data-action="settings"><span>⚙</span> 模型设置</button>
@@ -23,7 +23,7 @@
     <header class="topbar"><div class="actions"><button class="small" data-action="toggle-sidebar" aria-label="收起或展开导航" title="收起 / 展开导航">☰</button><div id="breadcrumb">工作空间 <span>/</span> 我的 Profiles</div></div><button class="connection-status" data-action="settings" id="connection-status">○ 配置视觉模型</button></header>
     <main id="main"></main>
   </div>
-  <div id="toast" role="status" aria-live="polite"></div>
+  <div id="toast" popover="manual" role="status" aria-live="polite"></div>
   <dialog id="modal"><div id="modal-body"></div></dialog>
   <input id="sample-upload" type="file" accept="application/pdf,image/png,image/jpeg" hidden>
   <input id="excel-upload" type="file" accept=".xlsx" hidden>

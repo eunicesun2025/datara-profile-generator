@@ -1,0 +1,21 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 420 96" role="img" aria-labelledby="title desc">
+  <title id="title">DATARA</title>
+  <desc id="desc">Datara data-to-structure mark and wordmark for light backgrounds</desc>
+  <defs>
+    <linearGradient id="d" x1="12" y1="16" x2="92" y2="82" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#B994FF"/><stop offset=".5" stop-color="#7C3AED"/><stop offset="1" stop-color="#5420D1"/>
+    </linearGradient>
+    <linearGradient id="data" x1="12" y1="20" x2="72" y2="68" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#B994FF"/><stop offset="1" stop-color="#5B21D6"/>
+    </linearGradient>
+  </defs>
+  <path fill="url(#d)" d="M42 12h22c22 0 36 14 36 36S86 84 64 84H42V69h22c13 0 21-8 21-21s-8-21-21-21H42V12Z"/>
+  <g fill="url(#data)">
+    <rect x="10" y="25" width="8" height="8" rx="1.5"/><rect x="23" y="16" width="10" height="10" rx="1.8"/>
+    <rect x="22" y="38" width="13" height="13" rx="2"/><rect x="11" y="56" width="10" height="10" rx="1.8"/>
+    <rect x="39" y="32" width="31" height="7" rx="3.5"/><rect x="39" y="45" width="36" height="7" rx="3.5"/>
+    <rect x="39" y="58" width="29" height="7" rx="3.5"/>
+  </g>
+  <text x="119" y="59" fill="#0B0F2B" font-family="Inter, Arial, sans-serif" font-size="45" font-weight="650" letter-spacing="7">DATARA</text>
+  <text x="121" y="81" fill="#59658F" font-family="Inter, Arial, sans-serif" font-size="9.5" font-weight="500" letter-spacing="4.1">DOCUMENTS TO VALUE</text>
+</svg>
