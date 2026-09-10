@@ -16,13 +16,14 @@ class ComparisonPolicy(Model):
 
 
 class OptimizationSettings(Model):
-    max_iterations: int = Field(default=10, ge=1, le=20)
+    max_iterations: int = Field(default=3, ge=1, le=20)
     early_stop_enabled: bool = True
-    no_improvement_limit: int = Field(default=3, ge=1, le=10)
+    no_improvement_limit: int = Field(default=2, ge=1, le=10)
     minimum_improvement: float = Field(default=0.01, ge=0.0, le=1.0)
     target_accuracy: float = Field(default=1.0, ge=0.0, le=1.0)
     max_regression_drop: float = Field(default=0.0, ge=0.0, le=0.05)
     final_validation_rerun: bool = True
+    reuse_baseline_results: bool = True
 
 
 class TestCaseCreate(Model):

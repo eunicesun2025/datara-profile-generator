@@ -341,6 +341,7 @@ dialog::backdrop{background:#0c203d66}
 .optimizer-number-input{display:flex;align-items:center;overflow:hidden;border:1px solid #d5dfec;border-radius:6px;background:#fff}
 .optimizer-number-input:focus-within{outline:2px solid #b4c9ea;border-color:#799dce}
 .optimizer-setting-grid .optimizer-number-input input{min-width:0;width:100%;padding:7px 8px;border:0;border-radius:0;background:transparent;color:#243f5f}
+.optimizer-setting-grid .optimizer-number-input input[type="checkbox"]{width:16px;height:16px;margin:7px 9px;padding:0;accent-color:#7257e8}
 .optimizer-setting-grid .optimizer-number-input input:focus{outline:0}
 .optimizer-number-input b{padding:0 9px;color:#6f8199;font-size:9px;font-weight:600}
 .optimizer-setting-grid small{display:block;min-height:34px;margin-top:7px;color:#7f8fa3;font-size:7px;line-height:1.55}

@@ -19,6 +19,7 @@ from .storage import Conflict, Store
 
 IMPORTED_OVERRIDE_MARKER = "===== DATARA SELECTED FIELD OVERRIDES ====="
 MAX_ANALYSIS_IMAGES = 8
+BASELINE_CACHE_MAX_AGE_SECONDS = 24 * 60 * 60
 
 
 def now() -> str:
@@ -368,6 +369,7 @@ def create_run_record(store: Store, body: OptimizationRunCreate) -> dict:
         "run_test_cases": cases, "dataset_hash": json_hash(cases), "iteration_ids": [],
         "extraction_ids": [], "baseline_metrics": None, "best_metrics": None,
         "final_validation_metrics": None, "result_summary": None, "stop_reason": None,
+        "cache_hits": 0,
         "promotion_eligible": False, "blocking_reasons": [], "progress": {},
         "created_at": stamp, "started_at": None, "finished_at": None,
         "cancel_requested_at": None,
@@ -424,6 +426,30 @@ class PromptOptimizerService:
     def _version(self, identity: str) -> dict:
         return self.store.read_json("optimizer/prompt_versions", identity)
 
+    def _cached_baseline(self, run: dict, version: dict, case: dict,
+                         connection: Connection, records: list[dict]) -> dict | None:
+        if not run["settings"].get("reuse_baseline_results", True):
+            return None
+        endpoint_hash = text_hash(connection.base_url.rstrip("/"))
+        cutoff = datetime.now(timezone.utc).timestamp() - BASELINE_CACHE_MAX_AGE_SECONDS
+        candidates = []
+        for record in records:
+            if (record.get("status") != "completed" or
+                    record.get("structure_validation", {}).get("status") != "valid" or
+                    record.get("prompt_hash") != version["prompt_hash"] or
+                    record.get("sample_sha256") != case["sample_sha256"] or
+                    record.get("model_id") != connection.model or
+                    record.get("provider_endpoint_hash") != endpoint_hash or
+                    record.get("json_structure_hash") != version["json_structure_hash"]):
+                continue
+            try:
+                finished = datetime.fromisoformat(record["finished_at"]).timestamp()
+            except (KeyError, TypeError, ValueError):
+                continue
+            if finished >= cutoff:
+                candidates.append(record)
+        return max(candidates, key=lambda item: item["finished_at"], default=None)
+
     async def _complete(self, connection: Connection, instructions: str, images: list,
                         reference_text: str = "") -> tuple[str, int]:
         attempts = 0
@@ -453,6 +479,9 @@ class PromptOptimizerService:
         instructions = version["rendered_prompt"]
         connection = self.connection().model_copy(deep=True)
         connection.model = connection.extraction_model.strip() or connection.model
+        cache_records = (self.store.list_json("optimizer/extractions")
+                         if phase == "baseline" and run["settings"].get("reuse_baseline_results", True)
+                         else [])
         failure_rows, regression_rows = [], []
         for index, case in enumerate(run["run_test_cases"], 1):
             self._cancelled(run)
@@ -463,15 +492,21 @@ class PromptOptimizerService:
             meta = json.loads((folder / "meta.json").read_text(encoding="utf-8"))
             images = [folder / f"{page}.jpg" for page in range(1, meta["pages"] + 1)]
             started = datetime.now(timezone.utc)
-            raw, attempt_count = await self._complete(connection, instructions, images)
             extraction_id = uid()
-            validation = None
-            try:
-                parsed = strict_json(raw)
-                validation = validate_result(profile, parsed)
-            except ValueError as exc:
-                parsed = {}
-                validation = {"errors": [str(exc)], "warnings": [], "status": "invalid"}
+            cached = (self._cached_baseline(run, version, case, connection, cache_records)
+                      if phase == "baseline" else None)
+            if cached:
+                raw, parsed = cached["raw_response"], cached["parsed_output"]
+                validation, attempt_count = validate_result(profile, parsed), 0
+                run["cache_hits"] = run.get("cache_hits", 0) + 1
+            else:
+                raw, attempt_count = await self._complete(connection, instructions, images)
+                try:
+                    parsed = strict_json(raw)
+                    validation = validate_result(profile, parsed)
+                except ValueError as exc:
+                    parsed = {}
+                    validation = {"errors": [str(exc)], "warnings": [], "status": "invalid"}
             truth = self.store.read_json("optimizer/ground_truth", case["ground_truth_id"])
             policies = {k: ComparisonPolicy.model_validate(v) for k, v in run["evaluation_policies"].items()}
             evaluations = evaluate_output(profile, truth["expected_output"], parsed,
@@ -486,7 +521,10 @@ class PromptOptimizerService:
                 "iteration_id": iteration_id, "phase": phase, "prompt_version_id": version["id"],
                 "test_case_id": case["test_case_id"], "dataset_role": case["dataset_role"],
                 "prompt_hash": version["prompt_hash"], "sample_sha256": case["sample_sha256"],
+                "provider_endpoint_hash": text_hash(connection.base_url.rstrip("/")),
+                "json_structure_hash": version["json_structure_hash"],
                 "model_id": connection.model, "status": "completed", "attempt_count": attempt_count,
+                "cache_hit": bool(cached), "cached_from_extraction_id": cached["id"] if cached else None,
                 "latency_ms": elapsed, "raw_response": raw, "parsed_output": parsed,
                 "structure_validation": validation, "field_evaluations": evaluations,
                 "started_at": started.isoformat(), "finished_at": now(),
@@ -558,6 +596,8 @@ class PromptOptimizerService:
         connection = self.connection().model_copy(deep=True)
         connection.model = connection.optimizer_model.strip() or connection.model
         images, image_manifest = self._analysis_images(run, evaluations)
+        if attempts:
+            images, image_manifest = [], []
         instructions = self._analysis_prompt(run, best, evaluations, attempts, image_manifest)
         original_prompt = best.get("imported_prompt_base") or best["rendered_prompt"]
         language = best.get("prompt_language") or prompt_language(original_prompt)

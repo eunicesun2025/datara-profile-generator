@@ -13,9 +13,9 @@ from datara.domain import FieldDef, TableDef, new_profile, normalize
 from datara.evaluation import compare_values, evaluate_output
 from datara.generators import profile_with_field_rules, prompt_components
 from datara.optimizer import (IMPORTED_OVERRIDE_MARKER, PromptOptimizerService,
-                              candidate_uses_language, ensure_prompt_version, import_prompt_version,
-                              prompt_language)
-from datara.optimizer_models import CandidateResponse, ComparisonPolicy
+                              candidate_uses_language, create_run_record, ensure_prompt_version,
+                              import_prompt_version, prompt_language)
+from datara.optimizer_models import CandidateResponse, ComparisonPolicy, OptimizationRunCreate
 from datara.provider import Connection
 from datara.storage import Store
 
@@ -109,6 +109,44 @@ def test_candidate_falls_back_to_text_when_optimizer_model_rejects_images(tmp_pa
     response, _ = asyncio.run(service._candidate(run, imported, evaluations, []))
     assert image_counts == [1, 0]
     assert response.candidate_rules[0].new_rule.startswith("提取发票购买方")
+
+
+def test_repeated_run_reuses_recent_valid_baseline_extraction(tmp_path, monkeypatch):
+    calls = 0
+
+    async def fake_completion(connection, key, instructions, images, reference_text=""):
+        nonlocal calls
+        calls += 1
+        return json.dumps({"AI_Document": {"invoice_number": "INV-1"}})
+
+    monkeypatch.setattr("datara.optimizer.completion", fake_completion)
+    with TestClient(create_app(tmp_path)) as client:
+        profile = new_profile("Baseline cache")
+        invoice = FieldDef(name="invoice_number")
+        profile.tables[0].fields.insert(0, invoice)
+        profile = client.post("/api/profiles/save", json=profile.model_dump()).json()
+        sample = client.post("/api/samples", files={"file": ("invoice.png", image_bytes())}).json()
+        case = client.post(f"/api/optimizer/profiles/{profile['id']}/test-cases", json={
+            "sample_id": sample["id"], "name": "invoice", "dataset_role": "failure",
+            "ground_truth": {"AI_Document": {"invoice_number": "INV-1"}},
+        }).json()
+        store = client.app.state.store
+        body = OptimizationRunCreate(
+            profile_id=profile["id"], profile_revision=profile["revision"],
+            selected_field_ids=[invoice.id], failure_test_case_ids=[case["id"]],
+        )
+        service = PromptOptimizerService(store, lambda: Connection(base_url="https://cache.test/v1",
+                                                                   model="qwen-vision"), lambda: "key")
+        first = create_run_record(store, body)
+        version = store.read_json("optimizer/prompt_versions", first["baseline_version_id"])
+        asyncio.run(service._extract_version(first, version, "baseline", None))
+        second = create_run_record(store, body)
+        asyncio.run(service._extract_version(second, version, "baseline", None))
+        assert calls == 1
+        assert second["cache_hits"] == 1
+        latest = store.read_json("optimizer/extractions", second["extraction_ids"][0])
+        assert latest["cache_hit"] is True
+        assert latest["cached_from_extraction_id"] == first["extraction_ids"][0]
 
 
 def test_field_rule_override_is_copy_only_and_ai_only():

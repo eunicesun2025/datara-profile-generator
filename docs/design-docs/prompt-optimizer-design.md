@@ -215,14 +215,15 @@ The run stores both selected field IDs and their table/field names. IDs are auth
 
 | Setting | Type and default | Rule |
 |---|---|---|
-| `max_iterations` | integer, default 10, range 1–20 | Hard candidate-generation limit. |
+| `max_iterations` | integer, default 3, range 1–20 | Hard candidate-generation limit. The smaller default avoids unexpectedly expensive first runs; users may still raise it to 10 or more. |
 | `early_stop_enabled` | boolean, default true | Enables plateau and target stops. |
-| `no_improvement_limit` | integer, default 3, range 1–10 | Consecutive non-accepted iterations before stopping. |
+| `no_improvement_limit` | integer, default 2, range 1–10 | Consecutive non-accepted iterations before stopping. |
 | `minimum_improvement` | ratio, default 0.01, range 0–1 | Minimum Failure target-accuracy gain over the current best; 0.01 is one percentage point. |
 | `target_accuracy` | decimal, default 1.0, range 0–1 | Stop after a candidate reaches the target and passes regression. |
 | `max_regression_drop` | ratio, default 0.0, range 0–0.05 | Explicit guardrail; changing from zero requires a warning and is persisted. |
 | `semantic_threshold` | decimal, default 0.90 | Used only by explicitly semantic fields. |
 | `final_validation_rerun` | boolean, default true and locked in V1 | Re-executes the best candidate before it becomes promotable. |
+| `reuse_baseline_results` | boolean, default true | Reuses a structurally valid extraction from the same endpoint, model, prompt hash, JSON structure, and document hash for up to 24 hours. Candidate and final-validation calls are never cached. |
 
 All percentage calculations use exact integer counts internally. Display percentages are rounded only in the UI.
 
@@ -957,7 +958,7 @@ Send a bounded structured error bundle containing:
 - previously attempted accepted/rejected rule hashes and decision reasons;
 - invariant rules stating that documents, extracted values, and ground truth are untrusted data.
 
-The candidate rule and explanatory fields must use the detected primary language of the baseline prompt. The application rejects a clearly English-only rule for a Chinese baseline (and vice versa) and uses the existing single schema-repair retry. Labels and field identifiers may remain in their source language. If the configured optimizer model rejects images, retry the analysis once without images while retaining the complete baseline prompt and mismatch context.
+The candidate rule and explanatory fields must use the detected primary language of the baseline prompt. The application rejects a clearly English-only rule for a Chinese baseline (and vice versa) and uses the existing single schema-repair retry. Labels and field identifiers may remain in their source language. Send diagnostic images only in the first optimization round; later rounds reuse the stored root-cause/decision trail and text context. If the configured optimizer model rejects images, retry the analysis once without images while retaining the complete baseline prompt and mismatch context.
 
 Do not send unselected field rules to the analyzer unless they already occur inside the imported prompt or a bounded field-name/value context is needed to explain confusion. The analyzer never receives the API key, storage paths, SQL, full Mapping, or System/Manual definitions.
 
