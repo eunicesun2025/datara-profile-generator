@@ -262,6 +262,121 @@ def test_repeated_run_reuses_recent_valid_baseline_extraction(tmp_path, monkeypa
         assert latest["cached_from_extraction_id"] == first["extraction_ids"][0]
 
 
+def test_baseline_cache_reuses_selected_fields_when_unselected_structure_is_invalid(tmp_path, monkeypatch):
+    calls = 0
+
+    async def fake_completion(connection, key, instructions, images, reference_text=""):
+        nonlocal calls
+        calls += 1
+        # The selected field is usable, while an unrelated required field is missing.
+        return json.dumps({"AI_Document": {"company_name": "Linde Huizhou"}})
+
+    monkeypatch.setattr("datara.optimizer.completion", fake_completion)
+    with TestClient(create_app(tmp_path)) as client:
+        profile = new_profile("Selected field baseline cache")
+        company = FieldDef(name="company_name")
+        invoice = FieldDef(name="invoice_number")
+        profile.tables[0].fields[:0] = [company, invoice]
+        profile = client.post("/api/profiles/save", json=profile.model_dump()).json()
+        sample = client.post("/api/samples", files={"file": ("invoice.png", image_bytes())}).json()
+        case = client.post(f"/api/optimizer/profiles/{profile['id']}/test-cases", json={
+            "sample_id": sample["id"], "name": "invoice", "dataset_role": "failure",
+            "ground_truth": {"AI_Document": {"company_name": "Linde Huizhou"}},
+        }).json()
+        store = client.app.state.store
+        body = OptimizationRunCreate(
+            profile_id=profile["id"], profile_revision=profile["revision"],
+            selected_field_ids=[company.id], failure_test_case_ids=[case["id"]],
+        )
+        service = PromptOptimizerService(
+            store, lambda: Connection(base_url="https://cache.test/v1", model="qwen-vision"),
+            lambda: "key")
+        first = create_run_record(store, body)
+        version = store.read_json("optimizer/prompt_versions", first["baseline_version_id"])
+        asyncio.run(service._extract_version(first, version, "baseline", None))
+        first_extraction = store.read_json("optimizer/extractions", first["extraction_ids"][0])
+        assert first_extraction["structure_validation"]["status"] == "invalid"
+
+        second = create_run_record(store, body)
+        asyncio.run(service._extract_version(second, version, "baseline", None))
+        assert calls == 1
+        assert second["cache_hits"] == 1
+
+
+def test_known_observed_failure_drives_candidate_when_current_baseline_is_lucky(tmp_path, monkeypatch):
+    field_id = None
+    analysis_calls = 0
+
+    async def fake_completion(connection, key, instructions, images, reference_text=""):
+        nonlocal analysis_calls
+        if "Datara 字段级提取提示词优化器" in instructions:
+            analysis_calls += 1
+            assert '"actual": "Linde GmbH"' in instructions
+            return json.dumps({
+                "analyses": [{
+                    "field_id": field_id, "table_name": "AI_Document",
+                    "field_name": "company_name", "error_type": "wrong_region",
+                    "root_cause": "历史运行误取了页眉开票方。",
+                    "evidence": ["已知错误输出为 Linde GmbH"],
+                    "suggested_change": "优先购买方地址块并排除 Corporate Office。",
+                }],
+                "candidate_rules": [{
+                    "field_id": field_id, "old_rule_hash": hashlib.sha256(b"").hexdigest(),
+                    "new_rule": "提取购买方地址块的完整公司名称，并排除页眉 Corporate Office 开票方。",
+                    "reason": "修复已确认的历史错误输出。",
+                }],
+            })
+        # The live rerun happens to be correct even before optimization.
+        return json.dumps({"AI_Document": {
+            "company_name": "Linde (Huizhou) Industrial Gas Co., Ltd.",
+        }})
+
+    monkeypatch.setattr("datara.optimizer.completion", fake_completion)
+    with TestClient(create_app(tmp_path)) as client:
+        client.post("/api/settings", json={
+            "base_url": "https://example.test/v1", "model": "test", "api_key": "optimizer-key",
+        })
+        profile = new_profile("Observed production failure")
+        company = FieldDef(name="company_name")
+        profile.tables[0].fields.insert(0, company)
+        field_id = company.id
+        profile = client.post("/api/profiles/save", json=profile.model_dump()).json()
+        sample = client.post("/api/samples", files={
+            "file": ("invoice.png", image_bytes()),
+        }).json()
+        case = client.post(f"/api/optimizer/profiles/{profile['id']}/test-cases", json={
+            "sample_id": sample["id"], "name": "intermittent failure",
+            "dataset_role": "failure",
+            "ground_truth": {"AI_Document": {
+                "company_name": "Linde (Huizhou) Industrial Gas Co., Ltd.",
+            }},
+            "observed_output": {"AI_Document": {"company_name": "Linde GmbH"}},
+        }).json()
+        assert case["observed_output"]["AI_Document"]["company_name"] == "Linde GmbH"
+
+        run = client.post("/api/optimizer/runs", json={
+            "profile_id": profile["id"], "profile_revision": profile["revision"],
+            "selected_field_ids": [company.id], "failure_test_case_ids": [case["id"]],
+            "settings": {"max_iterations": 1},
+        }).json()
+        for _ in range(100):
+            result = client.get("/api/optimizer/runs/" + run["id"]).json()
+            if result["status"] not in {"queued", "baselining", "optimizing", "validating"}:
+                break
+            time.sleep(0.01)
+
+        assert result["status"] == "completed", result
+        assert result["observed_failure_case_ids"] == [case["id"]]
+        assert result["baseline_metrics"]["failure_selected"]["ratio"] == 0
+        assert result["best_metrics"]["failure_selected"]["ratio"] == 1
+        assert result["promotion_eligible"] is True
+        assert analysis_calls == 1
+        iteration = client.get(f"/api/optimizer/runs/{run['id']}/iterations").json()[0]
+        assert iteration["diffs"][0]["failure_accuracy_before"]["ratio"] == 0
+        latest = client.get(f"/api/optimizer/profiles/{profile['id']}/runs/latest").json()
+        assert latest["id"] == run["id"]
+
+
 def test_field_rule_override_is_copy_only_and_ai_only():
     profile = new_profile()
     selected = FieldDef(name="invoice_number", extraction="old")

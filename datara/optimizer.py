@@ -366,11 +366,16 @@ def create_ground_truth(store: Store, profile: Profile, test_case_id: str,
 
 def create_test_case(store: Store, profile: Profile, body: TestCaseCreate) -> dict:
     sample = sample_snapshot(store, body.sample_id)
+    if body.observed_output is not None:
+        observed_validation = validate_ground_truth(profile, body.observed_output)
+        if observed_validation["errors"]:
+            raise ValueError("已知错误输出无效：" + "；".join(observed_validation["errors"]))
     identity = uid()
     stamp = now()
     record = {
         "schema_version": "1.0", "id": identity, "profile_id": profile.id,
         "name": body.name, "dataset_role": body.dataset_role, "enabled": True,
+        "observed_output": body.observed_output,
         **sample, "active_ground_truth_id": None, "created_at": stamp, "updated_at": stamp,
     }
     _write(store, "optimizer/test_cases", identity, record)
@@ -484,6 +489,9 @@ def create_run_record(store: Store, body: OptimizationRunCreate) -> dict:
             "test_case_id": identity, "name": case["name"], "dataset_role": role,
             "sample_id": case["sample_id"], "sample_sha256": case["sample_sha256"],
             "ground_truth_id": truth["id"], "ground_truth_hash": json_hash(truth["expected_output"]),
+            "observed_output": case.get("observed_output"),
+            "observed_output_hash": (json_hash(case["observed_output"])
+                                     if case.get("observed_output") is not None else None),
             "covered_field_ids": sorted(coverage), "order": order,
         })
     identity = uid()
@@ -554,16 +562,49 @@ class PromptOptimizerService:
     def _version(self, identity: str) -> dict:
         return self.store.read_json("optimizer/prompt_versions", identity)
 
+    def _observed_failure_rows(self, run: dict, version: dict) -> tuple[list[dict], set[str]]:
+        """Evaluate user-confirmed historical failures independently of a lucky baseline run."""
+        profile = Profile.model_validate(version["profile_snapshot"])
+        selected = {field["field_id"] for field in run["selected_fields"]}
+        policies = {key: ComparisonPolicy.model_validate(value)
+                    for key, value in run["evaluation_policies"].items()}
+        rows, failed_case_ids = [], set()
+        for case in run["run_test_cases"]:
+            observed = case.get("observed_output")
+            if case["dataset_role"] != "failure" or observed is None:
+                continue
+            truth = self.store.read_json("optimizer/ground_truth", case["ground_truth_id"])
+            evaluations = evaluate_output(
+                profile, truth["expected_output"], observed, selected, policies)
+            selected_failed = False
+            for evaluation in evaluations:
+                evaluation.update(
+                    test_case_id=case["test_case_id"], test_case_name=case["name"],
+                    dataset_role="failure", evidence_source="observed_failure",
+                )
+                if evaluation["selected"] and not evaluation["matched"]:
+                    selected_failed = True
+            if selected_failed:
+                failed_case_ids.add(case["test_case_id"])
+                rows.extend(evaluations)
+        return rows, failed_case_ids
+
     def _cached_baseline(self, run: dict, version: dict, case: dict,
                          connection: Connection, records: list[dict]) -> dict | None:
         if not run["settings"].get("reuse_baseline_results", True):
             return None
         endpoint_hash = text_hash(connection.base_url.rstrip("/"))
         cutoff = datetime.now(timezone.utc).timestamp() - BASELINE_CACHE_MAX_AGE_SECONDS
+        selected = {field["field_id"] for field in run["selected_fields"]}
+        required = selected & set(case.get("covered_field_ids") or [])
         candidates = []
         for record in records:
+            evaluated = {
+                row.get("field_id") for row in record.get("field_evaluations", [])
+                if row.get("field_id") in required and not row.get("indeterminate")
+            }
             if (record.get("status") != "completed" or
-                    record.get("structure_validation", {}).get("status") != "valid" or
+                    not required or not required.issubset(evaluated) or
                     record.get("prompt_hash") != version["prompt_hash"] or
                     record.get("sample_sha256") != case["sample_sha256"] or
                     record.get("model_id") != connection.model or
@@ -689,7 +730,7 @@ class PromptOptimizerService:
     def _analysis_prompt(self, run: dict, version: dict, evaluations: list[dict], attempts: list[dict],
                          image_manifest: list[dict] | None = None) -> str:
         selected = {f["field_id"] for f in run["selected_fields"]}
-        mismatches = [{k: row.get(k) for k in ("field_id", "field_name", "path", "expected", "actual", "reason")}
+        mismatches = [{k: row.get(k) for k in ("field_id", "field_name", "path", "expected", "actual", "reason", "evidence_source")}
                       for row in evaluations if row["field_id"] in selected and not row["matched"]][:100]
         fields = [{k: field[k] for k in ("field_id", "table_name", "field_name", "data_type", "description", "extraction_rule", "rule_hash")}
                   for field in version["field_rules"] if field["field_id"] in selected]
@@ -824,6 +865,16 @@ class PromptOptimizerService:
             baseline = self._version(run["baseline_version_id"])
             baseline_metrics, baseline_failure, baseline_regression = await self._extract_version(
                 run, baseline, "baseline", None)
+            observed_failure, observed_case_ids = self._observed_failure_rows(run, baseline)
+            if observed_case_ids:
+                # A recorded production failure is stronger evidence than a single lucky rerun.
+                # Replace the current rows for those cases only for baseline scoring/analysis;
+                # every candidate is still evaluated with a fresh real model extraction.
+                baseline_failure = [row for row in baseline_failure
+                                    if row["test_case_id"] not in observed_case_ids]
+                baseline_failure.extend(observed_failure)
+                baseline_metrics = summarize_metrics(baseline_failure, baseline_regression)
+                run["observed_failure_case_ids"] = sorted(observed_case_ids)
             run["baseline_metrics"] = baseline_metrics
             run["best_metrics"] = baseline_metrics
             if (run["settings"]["early_stop_enabled"] and
@@ -862,16 +913,13 @@ class PromptOptimizerService:
                 _write(self.store, "optimizer/iterations", iteration_id, iteration)
                 metrics, failure_rows, regression_rows = await self._extract_version(
                     run, candidate, "candidate", iteration_id)
-                # Evaluation rows are already separated for the current candidate. Reconstruct the previous
-                # phase split from persisted extractions so field diffs carry auditable before/after scores.
-                previous_failure = []
-                previous_regression = []
-                for extraction_id in run["extraction_ids"]:
-                    extraction = self.store.read_json("optimizer/extractions", extraction_id)
-                    if extraction["prompt_version_id"] != best["id"]:
-                        continue
-                    target = previous_failure if extraction["dataset_role"] == "failure" else previous_regression
-                    target.extend(extraction["field_evaluations"])
+                # Keep the same evidence used to select the candidate. For an intermittent
+                # production failure this may be the user-confirmed observed output rather
+                # than a lucky live baseline rerun.
+                previous_failure = [row for row in best_evaluations
+                                    if row.get("dataset_role") == "failure"]
+                previous_regression = [row for row in best_evaluations
+                                       if row.get("dataset_role") == "regression"]
                 for diff in diffs:
                     field_id = diff["field_id"]
                     diff["failure_accuracy_before"] = _field_score(previous_failure, field_id)

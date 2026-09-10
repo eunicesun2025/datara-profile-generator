@@ -72,6 +72,13 @@ def register_optimizer_routes(app: FastAPI, store: Store, tasks: dict):
         tasks[run["id"]] = asyncio.create_task(execute())
         return run
 
+    @app.get("/api/optimizer/profiles/{profile_id}/runs/latest")
+    def latest_optimizer_run(profile_id: str):
+        store.load(profile_id)
+        runs = [run for run in store.list_json("optimizer/runs")
+                if run["profile_id"] == profile_id]
+        return max(runs, key=lambda run: run["created_at"], default=None)
+
     @app.get("/api/optimizer/runs/{identity}")
     def get_optimizer_run(identity: str):
         return store.read_json("optimizer/runs", identity)

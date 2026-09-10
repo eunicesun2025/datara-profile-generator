@@ -31,6 +31,7 @@ class TestCaseCreate(Model):
     name: str = Field(default="Test case", min_length=1, max_length=200)
     dataset_role: Literal["failure", "regression"]
     ground_truth: dict[str, Any]
+    observed_output: dict[str, Any] | None = None
 
 
 class TestCaseUpdate(Model):
