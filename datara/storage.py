@@ -15,14 +15,24 @@ class Conflict(Exception):
 class Store:
     def __init__(self, root: Path):
         self.root = root.resolve()
-        for folder in ["profiles", "samples", "tests", "exports", "imports", "references"]:
+        for folder in ["profiles", "samples", "tests", "exports", "imports", "references",
+                       "optimizer/prompt_states", "optimizer/prompt_versions", "optimizer/test_cases",
+                       "optimizer/ground_truth", "optimizer/runs", "optimizer/iterations",
+                       "optimizer/extractions", "optimizer/promotions"]:
             (self.root / folder).mkdir(parents=True, exist_ok=True)
-        self.lock = threading.Lock()
+        self.lock = threading.RLock()
 
     def path(self, folder: str, identity: str, extension=".json") -> Path:
         if not re.fullmatch(r"[a-zA-Z0-9_-]{1,80}", identity):
             raise ValueError("无效的文件 ID")
         return self.root / folder / (identity + extension)
+
+    def read_json(self, folder: str, identity: str):
+        return json.loads(self.path(folder, identity).read_text(encoding="utf-8"))
+
+    def list_json(self, folder: str):
+        return [json.loads(path.read_text(encoding="utf-8"))
+                for path in (self.root / folder).glob("*.json")]
 
     def write_json(self, path: Path, data):
         temp = path.with_suffix("." + uid() + ".tmp")

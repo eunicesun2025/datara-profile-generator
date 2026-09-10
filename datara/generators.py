@@ -9,6 +9,12 @@ from openpyxl.styles import Alignment, Font, PatternFill
 
 from .domain import COLUMNS, Profile, ai_tables, effective_sql, json_structure, validate_profile
 
+GLOBAL_RULES_VERSION = "datara-extraction-v1"
+
+
+def text_hash(value: str) -> str:
+    return hashlib.sha256(value.encode("utf-8")).hexdigest()
+
 
 def mapping_rows(p: Profile) -> list[list]:
     table_names = {t.id: t.name for t in p.tables}
@@ -88,6 +94,63 @@ def prompt(p: Profile) -> str:
                  "日期为有效的 YYYYMMDD 字符串；数字输出 JSON 数值，布尔值使用 true/false。",
                  "String 和 Choice 必须是字符串。账号及业务编号保留前导零。"]
     return "\n".join(sections) + "\n"
+
+
+def prompt_components(p: Profile) -> dict:
+    """Stable optimizer projection. The rendered prompt remains owned by this module."""
+    fields = []
+    for table, ai_fields in ai_tables(p):
+        for field in ai_fields:
+            component = {
+                "table_id": table.id,
+                "table_name": table.name,
+                "table_role": table.role,
+                "field_id": field.id,
+                "field_name": field.name,
+                "source": field.source,
+                "data_type": field.data_type,
+                "description": field.description,
+                "is_required": field.is_required,
+                "choice_values": field.choice_values,
+                "extraction_rule": field.extraction,
+            }
+            component["rule_hash"] = text_hash(field.extraction)
+            component["component_hash"] = text_hash(json.dumps(component, ensure_ascii=False, sort_keys=True))
+            fields.append(component)
+    profile_rules = {
+        "accepted_documents": p.accepted_documents,
+        "rejected_documents": p.rejected_documents,
+        "document_rules": p.document_rules,
+    }
+    structure = json_structure(p)
+    sequence = [(f["table_id"], f["field_id"]) for f in fields]
+    return {
+        "global_rules_version": GLOBAL_RULES_VERSION,
+        "global_rules_hash": text_hash(GLOBAL_RULES_VERSION),
+        "profile_rules": profile_rules,
+        "profile_rules_hash": text_hash(json.dumps(profile_rules, ensure_ascii=False, sort_keys=True)),
+        "json_structure_hash": text_hash(json.dumps(structure, ensure_ascii=False, sort_keys=True)),
+        "field_sequence_hash": text_hash(json.dumps(sequence, ensure_ascii=False)),
+        "field_rules": fields,
+    }
+
+
+def profile_with_field_rules(p: Profile, rules: dict[str, str]) -> Profile:
+    """Return a copy with only allowlisted AI field extraction rules replaced."""
+    result = p.model_copy(deep=True)
+    found = set()
+    for table in result.tables:
+        for field in table.fields:
+            if field.id not in rules:
+                continue
+            if field.source != "AI":
+                raise ValueError(f"字段 {table.name}.{field.name} 不是 AI 字段")
+            field.extraction = rules[field.id]
+            found.add(field.id)
+    missing = set(rules) - found
+    if missing:
+        raise ValueError("提示词规则包含未知字段：" + ", ".join(sorted(missing)))
+    return result
 
 
 def fingerprint(p: Profile) -> str:

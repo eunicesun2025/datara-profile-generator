@@ -24,6 +24,8 @@ from .media import render_pages
 from .provider import Connection, ConnectionUpdate, completion, draft_prompt, parse_analysis, validate_connection
 from .references import reference_text, MAX_TEXT
 from .storage import Conflict, Store
+from .optimizer import ensure_prompt_version
+from .optimizer_routes import register_optimizer_routes
 
 STATIC = Path(__file__).parent / "static"
 
@@ -59,6 +61,13 @@ def create_app(data_dir: Path | None = None):
             record = json.loads(path.read_text(encoding="utf-8"))
             if record.get("status") == "running":
                 record.update(status="interrupted", error="应用重启，请重新发起请求")
+                store.write_json(path, record)
+        for path in (store.root / "optimizer" / "runs").glob("*.json"):
+            record = json.loads(path.read_text(encoding="utf-8"))
+            if record.get("status") in {"queued", "baselining", "optimizing", "validating"}:
+                record.update(status="interrupted", stop_reason="interrupted", promotion_eligible=False,
+                              blocking_reasons=["应用重启，请重新发起优化任务"],
+                              finished_at=datetime.now(timezone.utc).isoformat())
                 store.write_json(path, record)
         yield
         pending = list(tasks.values())
@@ -136,7 +145,9 @@ def create_app(data_dir: Path | None = None):
     @app.post("/api/profiles/save")
     def save_profile(profile: Profile):
         normalize(profile)
-        return store.save(profile)
+        saved = store.save(profile)
+        ensure_prompt_version(store, saved)
+        return saved
 
     @app.post("/api/normalize")
     def normalize_profile(profile: Profile):
@@ -392,6 +403,7 @@ def create_app(data_dir: Path | None = None):
         normalize(p)
         return p
 
+    register_optimizer_routes(app, store, tasks)
     app.mount("/static", StaticFiles(directory=STATIC), name="static")
     return app
 

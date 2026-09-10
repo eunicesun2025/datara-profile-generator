@@ -15,6 +15,8 @@ class Connection(Model):
     model: str = Field(default="qwen3.8-max-0902", max_length=200)
     timeout: int = Field(default=600, ge=10, le=1800)
     max_tokens: int = Field(default=4096, ge=256, le=32768)
+    optimizer_model: str = Field(default="", max_length=200)
+    extraction_model: str = Field(default="", max_length=200)
 
 
 class ConnectionUpdate(Connection):

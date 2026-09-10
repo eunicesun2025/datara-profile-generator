@@ -73,7 +73,8 @@ flowchart LR
 | `datara/media.py` | Converts PDF pages and supported images into bounded JPEG pages | No OCR or field extraction; PDF processing is serialized by a global lock |
 | `datara/provider.py` | Connection model/validation; OpenAI-compatible multimodal request; analysis prompt; strict parsing/filtering of Profile and AI-field add/update suggestions | One Chat Completions protocol only; no retries, streaming, native PDF, tool calling, or enforced structured-output mode; suggestions require user application |
 | `datara/references.py` | Extracts bounded text from XLSX, DOCX, TXT, Markdown, JSON, CSV, and SQL uploads | Treats content only as model context; no macros/code execution, OCR, PDF parsing, or semantic trust decision |
-| `datara/storage.py` | Directory creation, identifier-safe paths, atomic JSON writes, Profile listing/loading, optimistic revision saves | Local filesystem only; the lock protects Profile saves only and is not a cross-process lock |
+| `datara/storage.py` | Directory creation, identifier-safe paths, atomic JSON writes, Profile listing/loading, optimistic revision saves, optimizer version allocation | Local filesystem only; the re-entrant write lock is process-local, not a cross-process lock |
+| `datara/optimizer*.py`, `evaluation.py` | Deterministic optimizer state machine, test/ground-truth snapshots, field comparisons, regression gates, prompt versions, promotion, and rollback | Qwen proposes field rules; application code owns mutation, scoring, selection, and release gates |
 | `scripts/diagnose.py` | Read-only dependency, local port, data-directory, proxy/CA, and optional endpoint diagnostics | Does not read API keys or send documents |
 | `tests/` | Executable assertions for core generation, import, API, security, provider, and result-validation behavior | Provider tests use mock HTTP; no live model, Datara, or SQL Server integration test |
 
@@ -91,6 +92,8 @@ flowchart LR
 | Excel import | `POST /api/import/inspect`, `POST /api/import/apply` |
 | Model settings | `GET /api/settings`, `POST /api/settings`, `POST /api/settings/test` |
 | Model jobs | `POST /api/jobs`, `GET /api/jobs/{id}`, `POST /api/jobs/{id}/cancel`, `GET /api/profiles/{id}/tests` |
+| Prompt Optimizer | `/api/optimizer/profiles/{id}/test-cases`, `/api/optimizer/test-cases/{id}/ground-truth`, `/api/optimizer/runs`, `/api/optimizer/runs/{id}`, `/api/optimizer/runs/{id}/iterations`, and cancellation routes |
+| Prompt versions | `GET /api/profiles/{id}/prompt-versions`, `GET /api/prompt-versions/{id}`, `GET /api/prompt-versions/compare`, promotion, and rollback routes |
 | Built-in examples | `POST /api/demo/{cheque|invoice}` |
 
 There are no update/delete-specific Profile endpoints: edits replace a whole Profile through the save route, and no HTTP deletion operation exists for stored entities.
@@ -169,6 +172,7 @@ data/
   tests/<job-id>.json
   exports/<export-id>.zip
   exports/<export-id>.json
+  optimizer/{prompt_states,prompt_versions,test_cases,ground_truth,runs,iterations,extractions,promotions}/*.json
   connection.json
 ```
 

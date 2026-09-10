@@ -71,7 +71,8 @@ flowchart LR
 | `datara/media.py` | PDF/PNG/JPEG 转换为尺寸受控的 JPEG 页面 | 不做 OCR；PDF 渲染使用全局锁串行执行 |
 | `datara/references.py` | 读取 XLSX、DOCX、TXT、MD、JSON、CSV、SQL 为有界文本 | 不执行宏、公式、SQL 或文件内指令；扫描件需走样张路径 |
 | `datara/provider.py` | 模型连接配置、Chat Completions 多模态请求、分析提示词、返回解析与过滤 | 无重试、流式输出、原生 PDF、工具调用或协议级 JSON Schema |
-| `datara/storage.py` | 安全路径、目录、原子 JSON 写入、Profile 列表/读取、乐观版本保存 | 仅本地文件系统；写锁不是跨进程锁 |
+| `datara/storage.py` | 安全路径、目录、原子 JSON 写入、Profile 列表/读取、乐观版本保存和优化版本分配 | 仅本地文件系统；可重入写锁只在单进程内有效 |
+| `datara/optimizer*.py`、`evaluation.py` | 固定优化状态机、测试/标准答案快照、字段比较、回归门禁、提示词版本、发布与回滚 | Qwen 只建议字段规则；应用代码负责变更、评分、选择和发布门禁 |
 | `scripts/diagnose.py` | 只读检查依赖、端口、数据目录、代理、CA 和可选端点 | 不读取 API Key，不上传文档 |
 
 ## HTTP 接口
@@ -88,6 +89,8 @@ flowchart LR
 | Excel 导入 | `POST /api/import/inspect`、`POST /api/import/apply` |
 | 模型设置 | `GET /api/settings`、`POST /api/settings`、`POST /api/settings/test` |
 | 模型任务 | `POST /api/jobs`、`GET /api/jobs/{id}`、`POST /api/jobs/{id}/cancel`、`GET /api/profiles/{id}/tests` |
+| 提示词优化 | `/api/optimizer/profiles/{id}/test-cases`、`/api/optimizer/test-cases/{id}/ground-truth`、`/api/optimizer/runs`、任务读取、迭代读取及取消路由 |
+| 提示词版本 | `GET /api/profiles/{id}/prompt-versions`、`GET /api/prompt-versions/{id}`、版本比较、发布及回滚路由 |
 | 示例 | `POST /api/demo/{cheque|invoice}` |
 
 没有 Profile 或上传对象的删除接口。Profile 更新通过提交完整对象完成。
@@ -142,6 +145,7 @@ data/
   tests/<job-id>.json
   exports/<export-id>.zip
   exports/<export-id>.json
+  optimizer/{prompt_states,prompt_versions,test_cases,ground_truth,runs,iterations,extractions,promotions}/*.json
   connection.json
 ```
 

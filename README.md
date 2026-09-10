@@ -4,6 +4,7 @@
 
 - [中文架构说明](ARCHITECTURE.zh-CN.md) / [English architecture](ARCHITECTURE.md)
 - [中文生成器设计](docs/design-docs/generator-design.zh-CN.md) / [English generator design](docs/design-docs/generator-design.md)
+- [Prompt Optimizer V1 implementation design](docs/design-docs/prompt-optimizer-design.md)
 
 本地运行的 Datara Profile 编辑与生成工具。以统一字段定义为基准，生成 Field Mapping、SQL Server 建表脚本、中文提取提示词及 JSON 结构。
 
@@ -64,6 +65,9 @@ uv run uvicorn datara.app:app --host 127.0.0.1 --port 8765
 - AI 单据类型、提取规则、新增及已有 AI 字段修改建议，审核后应用；请求可取消。
 - 测试结果保留原始响应、定义指纹、模型名称及校验结果；旧结果提示过期。
 - 不需要模型连接也能粘贴 JSON，检查键名、来源、类型、日期与 Choice。
+- Prompt Optimizer：可粘贴或上传 TXT/MD，把已发布提示词设为优化基线；可直接上传失败 PDF、填写所选字段的 Ground truth，并只优化勾选的 AI 字段规则。Regression 案例可选，添加后会作为防退化门禁。
+- 应用按固定流程运行 baseline、Qwen 错误分析、候选提取、精确/归一化/可选语义比较、回归保护、提前停止与最终验证；导入提示词的正文会原样保留，候选只附加所选字段的高优先级覆盖规则。
+- 提示词版本历史、字段级 Diff、最佳版本选择、人工发布和前向回滚；发布和回滚都会创建新的 Profile revision，不会覆盖无关字段或改写历史。
 
 ## 固定规则
 
@@ -108,6 +112,7 @@ data/
   tests/          模型任务、响应与校验记录
   exports/        ZIP 和对应 Profile 快照
   connection.json  不含 API Key 的连接配置
+  optimizer/        测试案例、Ground truth、优化任务、提取证据及提示词版本
 ```
 
 修改数据目录请通过 `DATARA_DATA_DIR`。本版本不自动清理样本与测试记录，可在停止服务后备份或删除对应数据目录。多用户和多副本部署前需加入认证与共享存储；当前使用单进程本地文件存储。
