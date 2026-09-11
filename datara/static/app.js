@@ -79,6 +79,22 @@ function validTableName(name, excludeId=null) {
   if(!/^[A-Za-z_][A-Za-z0-9_]{0,99}$/.test(name)) throw Error('表名请使用英文、数字和下划线，不能以数字开头，最多 100 个字符');
   if(state.profile?.tables.some(t=>t.id!==excludeId&&t.name.toLowerCase()===name.toLowerCase())) throw Error('表名已存在，请使用不同名称');
 }
+function durationText(seconds) {
+  seconds=Math.max(0,Math.floor(Number(seconds)||0));
+  if(seconds<60)return `${seconds}秒`;
+  return `${Math.floor(seconds/60)}分${seconds%60}秒`;
+}
+function optimizerProgressText(run) {
+  const p=run?.progress||{};
+  const phase={baseline:'Baseline 提取',candidate_analysis:'生成候选提示词',candidate:'候选提示词评估',final_validation:'最终验证'}[p.phase]||p.phase||run?.status||'准备中';
+  const parts=[];
+  if(p.iteration)parts.push(`第 ${p.iteration} 轮`);
+  parts.push(phase);
+  if(p.case_total)parts.push(`案例 ${p.case}/${p.case_total}${p.case_name?` · ${p.case_name}`:''}`);
+  if(p.request_started_at)parts.push(`当前步骤已运行 ${durationText((Date.now()-new Date(p.request_started_at).getTime())/1000)}`);
+  if(p.timeout_seconds)parts.push(`单次请求上限 ${durationText(p.timeout_seconds)}`);
+  return parts.join(' · ');
+}
 function render() {
   $('#breadcrumb').innerHTML=state.profile ? `我的 Profiles <span>/</span> ${esc(state.profile.name)}` : '工作空间 <span>/</span> 我的 Profiles';
   $('#connection-status').textContent=state.settings?.has_key ? `● ${state.settings.model || '模型已配置'}` : '○ 配置视觉模型';
@@ -88,7 +104,7 @@ function render() {
     <div class="actions"><span class="save-state" id="save-state"></span><button data-action="save">保存草稿</button><button class="primary" data-action="export">↓ 导出 ZIP</button></div></div>
     <nav class="steps" aria-label="工作流程">${[['fields','字段定义'],['preview','输出预览'],['test','测试提取'],['optimizer','提示词优化']].map(([v,label],i)=>`<button class="step ${state.view===v?'active':''}" data-action="view" data-view="${v}"><b>${i+1}</b>${label}</button>`).join('')}</nav>
     ${state.job?.status==='running'?`<div class="notice job-banner"><span><span class="spinner"></span> 正在${state.job.kind==='draft'?'分析文档并建议字段（视觉模型通常需要 1–2 分钟）':'读取样本并提取数据'}…</span><button class="small" data-action="cancel-job">取消请求</button></div>`:''}
-    ${['queued','baselining','optimizing','validating'].includes(state.optimizer.run?.status)?`<div class="notice job-banner"><span><span class="spinner"></span> 提示词优化进行中 · ${esc(state.optimizer.run.progress?.phase||state.optimizer.run.status)}</span><button class="small" data-action="cancel-optimizer">取消优化</button></div>`:''}
+    ${['queued','baselining','optimizing','validating'].includes(state.optimizer.run?.status)?`<div class="notice job-banner"><span><span class="spinner"></span> 提示词优化进行中 · ${esc(optimizerProgressText(state.optimizer.run))}</span><button class="small" data-action="cancel-optimizer">取消优化</button></div>`:''}
     <div id="workspace-view"></div>`;
   updateSaveState();
   if(state.view==='fields') renderFields();

@@ -3,7 +3,9 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import logging
 import re
+import time
 from datetime import datetime, timezone
 from typing import Callable
 
@@ -20,6 +22,7 @@ from .storage import Conflict, Store
 IMPORTED_OVERRIDE_MARKER = "===== DATARA SELECTED FIELD OVERRIDES ====="
 MAX_ANALYSIS_IMAGES = 8
 BASELINE_CACHE_MAX_AGE_SECONDS = 24 * 60 * 60
+logger = logging.getLogger(__name__)
 
 
 def now() -> str:
@@ -643,6 +646,10 @@ class PromptOptimizerService:
                 limit = 1 if "请求超时" in message else 2 if "无法连接" in message else 3
                 if not transient or attempts >= limit:
                     raise
+                logger.warning(
+                    "optimizer_model_retry model=%s attempt=%d max_attempts=%d reason=%s",
+                    connection.model, attempts, limit, message,
+                )
                 await asyncio.sleep(min(2 ** (attempts - 1), 4))
 
     async def _extract_version(self, run: dict, version: dict, phase: str,
@@ -659,16 +666,25 @@ class PromptOptimizerService:
         failure_rows, regression_rows = [], []
         for index, case in enumerate(run["run_test_cases"], 1):
             self._cancelled(run)
+            started = datetime.now(timezone.utc)
+            timer = time.perf_counter()
             run["progress"] = {
                 "phase": phase, "case": index, "case_total": len(run["run_test_cases"]),
                 "case_name": case["name"], "iteration": len(run["iteration_ids"]),
                 "model_id": connection.model, "timeout_seconds": connection.timeout,
+                "request_started_at": started.isoformat(),
             }
             self._save_run(run)
+            logger.info(
+                "optimizer_case_started run_id=%s phase=%s iteration=%d case=%d/%d "
+                "case_name=%r model=%s timeout_seconds=%d",
+                run["id"], phase, len(run["iteration_ids"]), index,
+                len(run["run_test_cases"]), case["name"], connection.model,
+                connection.timeout,
+            )
             folder = self.store.path("samples", case["sample_id"], "")
             meta = json.loads((folder / "meta.json").read_text(encoding="utf-8"))
             images = [folder / f"{page}.jpg" for page in range(1, meta["pages"] + 1)]
-            started = datetime.now(timezone.utc)
             extraction_id = uid()
             cached = (self._cached_baseline(run, version, case, connection, cache_records)
                       if phase == "baseline" else None)
@@ -720,6 +736,15 @@ class PromptOptimizerService:
             _write(self.store, "optimizer/extractions", extraction_id, extraction)
             run["extraction_ids"].append(extraction_id)
             (failure_rows if case["dataset_role"] == "failure" else regression_rows).extend(evaluations)
+            selected_rows = [row for row in evaluations if row["selected"] and not row.get("indeterminate")]
+            logger.info(
+                "optimizer_case_completed run_id=%s phase=%s iteration=%d case=%d/%d "
+                "cache_hit=%s attempts=%d elapsed_seconds=%.1f selected_matches=%d/%d",
+                run["id"], phase, len(run["iteration_ids"]), index,
+                len(run["run_test_cases"]), bool(cached), attempt_count,
+                time.perf_counter() - timer, sum(bool(row["matched"]) for row in selected_rows),
+                len(selected_rows),
+            )
         return summarize_metrics(failure_rows, regression_rows), failure_rows, regression_rows
 
     def _analysis_images(self, run: dict, evaluations: list[dict]) -> tuple[list, list[dict]]:
@@ -784,12 +809,21 @@ class PromptOptimizerService:
                          run_connection: Connection | None = None):
         connection = (run_connection or self.connection()).model_copy(deep=True)
         connection.model = connection.optimizer_model.strip() or connection.model
+        started = datetime.now(timezone.utc)
+        timer = time.perf_counter()
         run["progress"] = {
             "phase": "candidate_analysis", "iteration": len(run.get("iteration_ids", [])),
             "model_id": connection.model, "timeout_seconds": connection.timeout,
+            "request_started_at": started.isoformat(),
         }
         if run.get("id"):
             self._save_run(run)
+            logger.info(
+                "optimizer_candidate_started run_id=%s iteration=%d model=%s "
+                "timeout_seconds=%d",
+                run["id"], len(run.get("iteration_ids", [])), connection.model,
+                connection.timeout,
+            )
         images, image_manifest = self._analysis_images(run, evaluations)
         if attempts:
             images, image_manifest = [], []
@@ -820,6 +854,13 @@ class PromptOptimizerService:
                     expected = "简体中文" if language == "zh-CN" else "英文"
                     raise ValueError(f"候选规则语言与原提示词不一致，应使用{expected}：" +
                                      ", ".join(mismatched_rules))
+                if run.get("id"):
+                    logger.info(
+                        "optimizer_candidate_completed run_id=%s iteration=%d "
+                        "changed_rules=%d elapsed_seconds=%.1f",
+                        run["id"], len(run.get("iteration_ids", [])),
+                        len(parsed.candidate_rules), time.perf_counter() - timer,
+                    )
                 return parsed, raw
             except Exception as exc:
                 last_error = exc
@@ -897,6 +938,14 @@ class PromptOptimizerService:
             },
         )
         self._save_run(run)
+        logger.info(
+            "optimizer_run_started run_id=%s profile_id=%s cases=%d selected_fields=%d "
+            "max_iterations=%d optimizer_model=%s extraction_model=%s timeout_seconds=%d",
+            run_id, run["profile_id"], len(run["run_test_cases"]),
+            len(run["selected_fields"]), run["settings"]["max_iterations"],
+            run["connection_snapshot"]["optimizer_model"],
+            run["connection_snapshot"]["extraction_model"], run_connection.timeout,
+        )
         try:
             baseline = self._version(run["baseline_version_id"])
             baseline_metrics, baseline_failure, baseline_regression = await self._extract_version(
@@ -918,6 +967,11 @@ class PromptOptimizerService:
                 run.update(status="completed", stop_reason="target_accuracy", promotion_eligible=False,
                            blocking_reasons=["Baseline 已达到目标准确率，无需生成候选版本"], finished_at=now())
                 self._save_run(run)
+                logger.info(
+                    "optimizer_run_completed run_id=%s stop_reason=target_accuracy "
+                    "best_iteration=none promotion_eligible=false",
+                    run_id,
+                )
                 return
             run["status"] = "optimizing"
             self._save_run(run)
@@ -936,6 +990,10 @@ class PromptOptimizerService:
                 _write(self.store, "optimizer/iterations", iteration_id, iteration)
                 run["iteration_ids"].append(iteration_id)
                 self._save_run(run)
+                logger.info(
+                    "optimizer_iteration_started run_id=%s iteration=%d/%d iteration_id=%s",
+                    run_id, number, run["settings"]["max_iterations"], iteration_id,
+                )
                 response, raw = await self._candidate(
                     run, best, best_evaluations, attempts, run_connection)
                 iteration["analyses"] = [a.model_dump() for a in response.analyses]
@@ -944,6 +1002,11 @@ class PromptOptimizerService:
                     iteration.update(status="rejected", decision_reasons=["候选字段规则未发生变化"],
                                      finished_at=now())
                     _write(self.store, "optimizer/iterations", iteration_id, iteration)
+                    logger.info(
+                        "optimizer_iteration_completed run_id=%s iteration=%d "
+                        "status=rejected reason=unchanged_prompt",
+                        run_id, number,
+                    )
                     stop_reason = "unchanged_prompt"
                     break
                 iteration.update(status="evaluating", candidate_version_id=candidate["id"], diffs=diffs)
@@ -967,6 +1030,12 @@ class PromptOptimizerService:
                 iteration.update(status="accepted" if accepted else "rejected", metrics=metrics,
                                  accepted=accepted, decision_reasons=reasons, finished_at=now())
                 _write(self.store, "optimizer/iterations", iteration_id, iteration)
+                logger.info(
+                    "optimizer_iteration_completed run_id=%s iteration=%d status=%s "
+                    "failure_score=%s regression_score=%s",
+                    run_id, number, iteration["status"],
+                    metrics["failure_selected"]["ratio"], metrics["regression_all"]["ratio"],
+                )
                 attempts.append({"candidate_rule_hashes": [f["rule_hash"] for f in candidate["field_rules"]
                                                             if f["field_id"] in {x["field_id"] for x in run["selected_fields"]}],
                                  "accepted": accepted, "reasons": reasons})
@@ -990,6 +1059,11 @@ class PromptOptimizerService:
                 run.update(status="completed", promotion_eligible=False,
                            blocking_reasons=["没有候选版本同时通过提升阈值和回归保护线"], finished_at=now())
                 self._save_run(run)
+                logger.info(
+                    "optimizer_run_completed run_id=%s stop_reason=%s best_iteration=none "
+                    "promotion_eligible=false",
+                    run_id, stop_reason,
+                )
                 return
             run["status"] = "validating"
             self._save_run(run)
@@ -1024,10 +1098,17 @@ class PromptOptimizerService:
                 best["metrics"] = final_metrics
                 _write(self.store, "optimizer/prompt_versions", best["id"], best)
             self._save_run(run)
+            logger.info(
+                "optimizer_run_completed run_id=%s stop_reason=%s best_iteration=%s "
+                "promotion_eligible=%s",
+                run_id, stop_reason, run.get("best_iteration_number"),
+                run["promotion_eligible"],
+            )
         except asyncio.CancelledError:
             run.update(status="cancelled", stop_reason="cancelled", promotion_eligible=False,
                        blocking_reasons=["任务已取消；未完成最终验证"], finished_at=now())
             self._save_run(run)
+            logger.info("optimizer_run_cancelled run_id=%s", run_id)
         except Exception as exc:
             key = self.api_key()
             safe = str(exc).replace(key, "[redacted]") if key else str(exc)
@@ -1041,6 +1122,11 @@ class PromptOptimizerService:
             run.update(status="failed", stop_reason="error", promotion_eligible=False,
                        blocking_reasons=[safe[:1000]], finished_at=now())
             self._save_run(run)
+            logger.error(
+                "optimizer_run_failed run_id=%s phase=%s iteration=%s error=%s",
+                run_id, run.get("progress", {}).get("phase"),
+                run.get("progress", {}).get("iteration"), safe[:1000],
+            )
 
 
 def promote_version(store: Store, version_id: str, expected_revision: int,

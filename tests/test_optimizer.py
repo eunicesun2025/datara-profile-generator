@@ -470,7 +470,8 @@ def test_optimizer_does_not_repeat_a_full_model_timeout(tmp_path, monkeypatch):
     assert calls == 1
 
 
-def test_candidate_evaluation_timeout_preserves_candidate_and_fails_iteration(tmp_path, monkeypatch):
+def test_candidate_evaluation_timeout_preserves_candidate_and_fails_iteration(
+        tmp_path, monkeypatch, caplog):
     field_id = None
     timeout_calls = 0
 
@@ -492,6 +493,7 @@ def test_candidate_evaluation_timeout_preserves_candidate_and_fails_iteration(tm
         return json.dumps({"AI_Document": {"company_name": "正确公司"}})
 
     monkeypatch.setattr("datara.optimizer.completion", fake_completion)
+    caplog.set_level("INFO", logger="datara.optimizer")
     with TestClient(create_app(tmp_path)) as client:
         client.post("/api/settings", json={
             "base_url": "https://example.test/v1", "model": "extract-model",
@@ -530,6 +532,11 @@ def test_candidate_evaluation_timeout_preserves_candidate_and_fails_iteration(tm
         assert iteration["status"] == "failed"
         assert iteration["candidate_version_id"]
         assert timeout_calls == 1
+        messages = "\n".join(record.getMessage() for record in caplog.records)
+        assert "optimizer_run_started" in messages
+        assert "optimizer_candidate_completed" in messages
+        assert "optimizer_run_failed" in messages
+        assert "optimizer-key" not in messages
 
 
 def test_optimizer_workflow_promote_and_version_history(tmp_path, monkeypatch):
