@@ -637,16 +637,21 @@ class PromptOptimizerService:
                     "HTTP 429", "HTTP 500", "HTTP 502", "HTTP 503", "HTTP 504",
                     "请求超时", "无法连接模型端点",
                 ))
-                limit = 2 if "请求超时" in message or "无法连接" in message else 3
+                # A model timeout may already have consumed 10–30 minutes. Retrying the
+                # identical large vision request here made one failed sample look like a
+                # task that was stuck for twice the configured timeout.
+                limit = 1 if "请求超时" in message else 2 if "无法连接" in message else 3
                 if not transient or attempts >= limit:
                     raise
                 await asyncio.sleep(min(2 ** (attempts - 1), 4))
 
     async def _extract_version(self, run: dict, version: dict, phase: str,
-                               iteration_id: str | None) -> tuple[dict, list[dict], list[dict]]:
+                               iteration_id: str | None,
+                               run_connection: Connection | None = None
+                               ) -> tuple[dict, list[dict], list[dict]]:
         profile = Profile.model_validate(version["profile_snapshot"])
         instructions = version["rendered_prompt"]
-        connection = self.connection().model_copy(deep=True)
+        connection = (run_connection or self.connection()).model_copy(deep=True)
         connection.model = connection.extraction_model.strip() or connection.model
         cache_records = (self.store.list_json("optimizer/extractions")
                          if phase == "baseline" and run["settings"].get("reuse_baseline_results", True)
@@ -654,8 +659,11 @@ class PromptOptimizerService:
         failure_rows, regression_rows = [], []
         for index, case in enumerate(run["run_test_cases"], 1):
             self._cancelled(run)
-            run["progress"] = {"phase": phase, "case": index, "case_total": len(run["run_test_cases"]),
-                               "iteration": len(run["iteration_ids"])}
+            run["progress"] = {
+                "phase": phase, "case": index, "case_total": len(run["run_test_cases"]),
+                "case_name": case["name"], "iteration": len(run["iteration_ids"]),
+                "model_id": connection.model, "timeout_seconds": connection.timeout,
+            }
             self._save_run(run)
             folder = self.store.path("samples", case["sample_id"], "")
             meta = json.loads((folder / "meta.json").read_text(encoding="utf-8"))
@@ -669,7 +677,18 @@ class PromptOptimizerService:
                 validation, attempt_count = validate_result(profile, parsed), 0
                 run["cache_hits"] = run.get("cache_hits", 0) + 1
             else:
-                raw, attempt_count = await self._complete(connection, instructions, images)
+                try:
+                    raw, attempt_count = await self._complete(connection, instructions, images)
+                except ValueError as exc:
+                    phase_name = {
+                        "baseline": "Baseline 提取",
+                        "candidate": "候选提示词评估",
+                        "final_validation": "最终验证",
+                    }.get(phase, phase)
+                    raise ValueError(
+                        f"{phase_name}失败：案例「{case['name']}」调用文档提取模型 "
+                        f"{connection.model} 时出错（单次超时 {connection.timeout} 秒）：{exc}"
+                    ) from exc
                 try:
                     parsed = strict_json(raw)
                     validation = validate_result(profile, parsed)
@@ -761,9 +780,16 @@ class PromptOptimizerService:
             "输入数据：" + json.dumps(payload, ensure_ascii=False),
         ])
 
-    async def _candidate(self, run: dict, best: dict, evaluations: list[dict], attempts: list[dict]):
-        connection = self.connection().model_copy(deep=True)
+    async def _candidate(self, run: dict, best: dict, evaluations: list[dict], attempts: list[dict],
+                         run_connection: Connection | None = None):
+        connection = (run_connection or self.connection()).model_copy(deep=True)
         connection.model = connection.optimizer_model.strip() or connection.model
+        run["progress"] = {
+            "phase": "candidate_analysis", "iteration": len(run.get("iteration_ids", [])),
+            "model_id": connection.model, "timeout_seconds": connection.timeout,
+        }
+        if run.get("id"):
+            self._save_run(run)
         images, image_manifest = self._analysis_images(run, evaluations)
         if attempts:
             images, image_manifest = [], []
@@ -859,12 +885,22 @@ class PromptOptimizerService:
 
     async def run(self, run_id: str):
         run = self.store.read_json("optimizer/runs", run_id)
-        run.update(status="baselining", started_at=now())
+        run_connection = self.connection().model_copy(deep=True)
+        run.update(
+            status="baselining", started_at=now(),
+            connection_snapshot={
+                "model": run_connection.model,
+                "optimizer_model": run_connection.optimizer_model.strip() or run_connection.model,
+                "extraction_model": run_connection.extraction_model.strip() or run_connection.model,
+                "timeout_seconds": run_connection.timeout,
+                "max_tokens": run_connection.max_tokens,
+            },
+        )
         self._save_run(run)
         try:
             baseline = self._version(run["baseline_version_id"])
             baseline_metrics, baseline_failure, baseline_regression = await self._extract_version(
-                run, baseline, "baseline", None)
+                run, baseline, "baseline", None, run_connection)
             observed_failure, observed_case_ids = self._observed_failure_rows(run, baseline)
             if observed_case_ids:
                 # A recorded production failure is stronger evidence than a single lucky rerun.
@@ -900,7 +936,8 @@ class PromptOptimizerService:
                 _write(self.store, "optimizer/iterations", iteration_id, iteration)
                 run["iteration_ids"].append(iteration_id)
                 self._save_run(run)
-                response, raw = await self._candidate(run, best, best_evaluations, attempts)
+                response, raw = await self._candidate(
+                    run, best, best_evaluations, attempts, run_connection)
                 iteration["analyses"] = [a.model_dump() for a in response.analyses]
                 candidate, diffs = self._build_candidate_version(run, best, response, raw, iteration_id)
                 if not candidate:
@@ -912,7 +949,7 @@ class PromptOptimizerService:
                 iteration.update(status="evaluating", candidate_version_id=candidate["id"], diffs=diffs)
                 _write(self.store, "optimizer/iterations", iteration_id, iteration)
                 metrics, failure_rows, regression_rows = await self._extract_version(
-                    run, candidate, "candidate", iteration_id)
+                    run, candidate, "candidate", iteration_id, run_connection)
                 # Keep the same evidence used to select the candidate. For an intermittent
                 # production failure this may be the user-confirmed observed output rather
                 # than a lucky live baseline rerun.
@@ -957,7 +994,7 @@ class PromptOptimizerService:
             run["status"] = "validating"
             self._save_run(run)
             final_metrics, final_failure, final_regression = await self._extract_version(
-                run, best, "final_validation", None)
+                run, best, "final_validation", None, run_connection)
             run["final_validation_metrics"] = final_metrics
             final_ok, final_reasons = decide_candidate(baseline_metrics, baseline_metrics, final_metrics,
                                                        run["settings"])
@@ -994,6 +1031,13 @@ class PromptOptimizerService:
         except Exception as exc:
             key = self.api_key()
             safe = str(exc).replace(key, "[redacted]") if key else str(exc)
+            if run.get("iteration_ids"):
+                iteration = self.store.read_json(
+                    "optimizer/iterations", run["iteration_ids"][-1])
+                if iteration.get("status") in {"analyzing", "evaluating"}:
+                    iteration.update(
+                        status="failed", decision_reasons=[safe[:1000]], finished_at=now())
+                    _write(self.store, "optimizer/iterations", iteration["id"], iteration)
             run.update(status="failed", stop_reason="error", promotion_eligible=False,
                        blocking_reasons=[safe[:1000]], finished_at=now())
             self._save_run(run)

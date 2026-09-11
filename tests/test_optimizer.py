@@ -455,6 +455,83 @@ def test_optimizer_retries_transient_qwen_error(tmp_path, monkeypatch):
     assert raw == "{}" and attempts == 2
 
 
+def test_optimizer_does_not_repeat_a_full_model_timeout(tmp_path, monkeypatch):
+    calls = 0
+
+    async def timeout(connection, key, instructions, images):
+        nonlocal calls
+        calls += 1
+        raise ValueError("模型请求超时，可调整超时设置后重试")
+
+    monkeypatch.setattr("datara.optimizer.completion", timeout)
+    service = PromptOptimizerService(Store(tmp_path), lambda: Connection(), lambda: "key")
+    with pytest.raises(ValueError, match="模型请求超时"):
+        asyncio.run(service._complete(Connection(timeout=1800), "task", []))
+    assert calls == 1
+
+
+def test_candidate_evaluation_timeout_preserves_candidate_and_fails_iteration(tmp_path, monkeypatch):
+    field_id = None
+    timeout_calls = 0
+
+    async def fake_completion(connection, key, instructions, images, reference_text=""):
+        nonlocal timeout_calls
+        if "Datara 字段级提取提示词优化器" in instructions:
+            return json.dumps({
+                "analyses": [],
+                "candidate_rules": [{
+                    "field_id": field_id,
+                    "old_rule_hash": hashlib.sha256(b"").hexdigest(),
+                    "new_rule": "提取购买方完整公司名称，并排除页眉中的开票方。",
+                    "reason": "修复公司角色混淆。",
+                }],
+            })
+        if "排除页眉中的开票方" in instructions:
+            timeout_calls += 1
+            raise ValueError("模型请求超时，可调整超时设置后重试")
+        return json.dumps({"AI_Document": {"company_name": "正确公司"}})
+
+    monkeypatch.setattr("datara.optimizer.completion", fake_completion)
+    with TestClient(create_app(tmp_path)) as client:
+        client.post("/api/settings", json={
+            "base_url": "https://example.test/v1", "model": "extract-model",
+            "optimizer_model": "optimizer-model", "extraction_model": "extract-model",
+            "timeout": 1800, "api_key": "optimizer-key",
+        })
+        profile = new_profile("Candidate timeout")
+        company = FieldDef(name="company_name")
+        profile.tables[0].fields.insert(0, company)
+        field_id = company.id
+        profile = client.post("/api/profiles/save", json=profile.model_dump()).json()
+        sample = client.post(
+            "/api/samples", files={"file": ("invoice.png", image_bytes())}).json()
+        case = client.post(f"/api/optimizer/profiles/{profile['id']}/test-cases", json={
+            "sample_id": sample["id"], "name": "Huizhou invoice",
+            "dataset_role": "failure",
+            "ground_truth": {"AI_Document": {"company_name": "正确公司"}},
+            "observed_output": {"AI_Document": {"company_name": "错误公司"}},
+        }).json()
+        run = client.post("/api/optimizer/runs", json={
+            "profile_id": profile["id"], "profile_revision": profile["revision"],
+            "selected_field_ids": [field_id], "failure_test_case_ids": [case["id"]],
+            "settings": {"max_iterations": 1},
+        }).json()
+        for _ in range(100):
+            result = client.get("/api/optimizer/runs/" + run["id"]).json()
+            if result["status"] not in {"queued", "baselining", "optimizing", "validating"}:
+                break
+            time.sleep(0.01)
+
+        assert result["status"] == "failed"
+        assert result["connection_snapshot"]["timeout_seconds"] == 1800
+        assert "候选提示词评估失败" in result["blocking_reasons"][0]
+        assert "单次超时 1800 秒" in result["blocking_reasons"][0]
+        iteration = client.get(f"/api/optimizer/runs/{run['id']}/iterations").json()[0]
+        assert iteration["status"] == "failed"
+        assert iteration["candidate_version_id"]
+        assert timeout_calls == 1
+
+
 def test_optimizer_workflow_promote_and_version_history(tmp_path, monkeypatch):
     failure_sample_id = None
     field_id = None
