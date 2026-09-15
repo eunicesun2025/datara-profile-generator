@@ -24,6 +24,7 @@ class OptimizationSettings(Model):
     max_regression_drop: float = Field(default=0.0, ge=0.0, le=0.05)
     final_validation_rerun: bool = True
     reuse_baseline_results: bool = True
+    extraction_concurrency: int = Field(default=2, ge=1, le=4)
 
 
 class TestCaseCreate(Model):

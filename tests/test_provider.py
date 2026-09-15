@@ -108,3 +108,36 @@ def test_invalid_ca_file_has_actionable_error(monkeypatch, tmp_path):
     monkeypatch.setenv('SSL_CERT_FILE', str(tmp_path / 'missing.pem'))
     with pytest.raises(ValueError, match='无法加载 TLS 配置'):
         asyncio.run(completion(Connection(), 'private-key', '任务', []))
+
+
+@pytest.mark.parametrize('model,host,explicit,expected', [
+    ('qwen3.8-max-0902', 'dashscope.aliyuncs.com', None, False),
+    ('qwen3.8-max-0902', 'dashscope.aliyuncs.com', True, True),
+    ('qwen3.8-max-0902', 'enterprise.test', None, None),
+    ('other-model', 'dashscope.aliyuncs.com', None, None),
+])
+def test_thinking_switch_is_scoped_to_supported_provider(monkeypatch, model, host, explicit, expected):
+    real_client = httpx.AsyncClient
+    def handler(request):
+        payload = json.loads(request.content)
+        if expected is None:
+            assert 'enable_thinking' not in payload
+        else:
+            assert payload['enable_thinking'] is expected
+        return httpx.Response(200, json={'choices': [{'message': {'content': '{}'}}]})
+    monkeypatch.setattr('datara.provider.httpx.AsyncClient', lambda **kw: real_client(transport=httpx.MockTransport(handler), **kw))
+    asyncio.run(completion(Connection(base_url=f'https://{host}/v1', model=model, enable_thinking=explicit), 'test-key', 'task', []))
+
+
+def test_total_deadline_stops_a_response_that_keeps_sending_chunks(monkeypatch):
+    class Trickle(httpx.AsyncByteStream):
+        async def __aiter__(self):
+            while True:
+                await asyncio.sleep(0.005)
+                yield b' '
+    real_client = httpx.AsyncClient
+    monkeypatch.setattr('datara.provider.httpx.AsyncClient', lambda **kw: real_client(
+        transport=httpx.MockTransport(lambda r: httpx.Response(200, stream=Trickle())), **kw))
+    connection = Connection().model_copy(update={'timeout': 0.03})
+    with pytest.raises(ValueError, match='请求超时'):
+        asyncio.run(completion(connection, 'test-key', 'task', []))

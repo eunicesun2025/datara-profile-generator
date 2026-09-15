@@ -1,6 +1,9 @@
+import asyncio
 import base64
 import json
+import logging
 import ssl
+import time
 from pathlib import Path
 from urllib.parse import urlparse
 
@@ -8,6 +11,8 @@ import httpx
 from pydantic import Field
 
 from .domain import Model, Profile, FieldDef, SYSTEM, strict_json, snake_name, infer_type
+
+logger = logging.getLogger(__name__)
 
 
 class Connection(Model):
@@ -17,6 +22,7 @@ class Connection(Model):
     max_tokens: int = Field(default=4096, ge=256, le=32768)
     optimizer_model: str = Field(default="", max_length=200)
     extraction_model: str = Field(default="", max_length=200)
+    enable_thinking: bool | None = None
 
 
 class ConnectionUpdate(Connection):
@@ -56,12 +62,27 @@ async def completion(c: Connection, key: str, instructions: str, images: list[Pa
     payload = {"model": c.model, "messages": [{"role": "system", "content": instructions},
                                                {"role": "user", "content": content}],
                "max_tokens": c.max_tokens, "stream": False}
+    thinking = c.enable_thinking
+    host = urlparse(c.base_url).hostname or ""
+    # Official Qwen 3.8 supports this switch. Avoid vendor-specific parameters
+    # on unrelated models/gateways unless explicitly configured by the user.
+    if (thinking is None and c.model.startswith(("qwen3.8-max", "qwen3.8-flash"))
+            and (host == "dashscope.aliyuncs.com" or host.startswith("dashscope-")
+                 and host.endswith(".aliyuncs.com"))):
+        thinking = False
+    if thinking is not None:
+        payload["enable_thinking"] = thinking
+    started = time.perf_counter()
+    logger.info("model_request_started model=%s images=%d image_bytes=%d text_characters=%d timeout_seconds=%s",
+                c.model, len(images), total, len(instructions) + len(user_text), c.timeout)
     try:
         # Preserve TLS verification; company CA bundles and proxies are configured
         # in the launching terminal, never persisted with endpoint credentials.
-        async with httpx.AsyncClient(timeout=httpx.Timeout(c.timeout, connect=15), follow_redirects=False, trust_env=True) as client:
-            response = await client.post(c.base_url.rstrip("/") + "/chat/completions", json=payload,
-                                         headers={"Authorization": "Bearer " + key})
+        # HTTPX read timeout applies between chunks, not to total response time.
+        async with asyncio.timeout(c.timeout):
+            async with httpx.AsyncClient(timeout=httpx.Timeout(c.timeout, connect=15), follow_redirects=False, trust_env=True) as client:
+                response = await client.post(c.base_url.rstrip("/") + "/chat/completions", json=payload,
+                                             headers={"Authorization": "Bearer " + key})
         if response.status_code == 401:
             raise ValueError("模型接口返回 HTTP 401：API Key 认证失败。请重新粘贴有效 Key（不含 Bearer 前缀），确认 Key 的地域及套餐与 Base URL 一致；百炼通用 Key 与 Coding / Token Plan 专属地址不可混用。")
         if response.status_code in {400, 413, 422} and reference_text:
@@ -82,7 +103,7 @@ async def completion(c: Connection, key: str, instructions: str, images: list[Pa
         if not isinstance(result, str):
             raise ValueError("模型未返回文本内容；请检查接口是否兼容 Chat Completions")
         return result
-    except httpx.TimeoutException as e:
+    except (httpx.TimeoutException, TimeoutError) as e:
         raise ValueError("模型请求超时，可调整超时设置后重试") from e
     except httpx.HTTPError as e:
         cause = e
@@ -99,6 +120,9 @@ async def completion(c: Connection, key: str, instructions: str, images: list[Pa
         raise ValueError("无法加载 TLS 配置：请检查 SSL_CERT_FILE / SSL_CERT_DIR 是否存在且为有效的可信 CA 证书；修正后重启服务") from e
     except (KeyError, IndexError, json.JSONDecodeError) as e:
         raise ValueError("模型响应格式不兼容，期望 choices[0].message.content") from e
+    finally:
+        logger.info("model_request_finished model=%s elapsed_seconds=%.2f",
+                    c.model, time.perf_counter() - started)
 
 
 def draft_prompt(p: Profile, request: str) -> str:

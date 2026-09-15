@@ -168,3 +168,12 @@ uv run pytest -q
 - 暂未实现 PDF 框选、深层子表、用户登录、模型供应商非兼容协议、多实例部署和持久化任务队列。
 
 架构保持端点配置、存储与生成器分离，可后续容器化；目前不包含未经验证的部署配置。
+
+### 优化耗时与模型设置
+
+- 已填写 `observed_output` 的失败案例：如果该输出覆盖全部 Ground truth 字段且存在所选字段错误，直接将其作为历史基线，省去重复提取。候选评估和最终复验仍调用模型。历史结果不作为真实模型缓存复用。
+- `OptimizationSettings.extraction_concurrency` 默认 2，可通过优化任务 API 设为 1–4。只并发独立样本；优化轮次仍有先后依赖。失败或取消会取消同批未完成请求。
+- 模型超时同时约束完整响应时间；优化请求的重试与退避共用该次请求的时间预算。HTTPX 的分块读取超时不再是唯一限制。
+- 百炼官方 DashScope 接口上的 `qwen3.8-max*` / `qwen3.8-flash*` 默认发送 `enable_thinking=false`，减少额外思考。其他模型或企业网关默认不发送此专用参数。可通过设置 API 的 `enable_thinking` 显式设为 `true` / `false`，`null` 恢复上述自动策略。请用业务样本核验切换后的准确率。参数依据：[百炼视觉推理文档](https://www.alibabacloud.com/help/en/model-studio/visual-reasoning)。
+- 开启 `datara.provider` 和 `datara.optimizer` 的 INFO 日志可看到每次调用的模型、输入文字长度、图片数量/字节数、开始及耗时；不会记录 API Key 或请求正文。
+- 模拟接口测试只验证流程、并发及超时行为，不代表真实模型响应速度或识别准确率。

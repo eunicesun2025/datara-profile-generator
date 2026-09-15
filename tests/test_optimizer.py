@@ -844,3 +844,101 @@ def test_invoice_company_optimizer_runs_with_imported_prompt_and_no_regression_s
         assert iteration["diffs"][0]["old_rule_source"] == "imported_prompt"
         saved_fields = promoted.json()["profile"]["tables"][0]["fields"]
         assert next(f for f in saved_fields if f["id"] == invoice_number.id)["extraction"] == "keep invoice number rule"
+
+
+def make_speed_case(client, count=1, observed=False):
+    profile = new_profile('Speed fixture')
+    company = FieldDef(name='company_name')
+    profile.tables[0].fields.insert(0, company)
+    profile = client.post('/api/profiles/save', json=profile.model_dump()).json()
+    ids = []
+    for i in range(count):
+        sample = client.post('/api/samples', files={'file': ('invoice.png', image_bytes())}).json()
+        case = client.post(f"/api/optimizer/profiles/{profile['id']}/test-cases", json={
+            'sample_id': sample['id'], 'name': f'case-{i}', 'dataset_role': 'failure',
+            'ground_truth': {'AI_Document': {'company_name': 'Billing Entity Ltd.'}},
+            'observed_output': {'AI_Document': {'company_name': 'Delivery Entity Ltd.'}} if observed else None,
+        }).json()
+        ids.append(case['id'])
+    body = OptimizationRunCreate(profile_id=profile['id'], profile_revision=profile['revision'],
+                                selected_field_ids=[company.id], failure_test_case_ids=ids)
+    store = client.app.state.store
+    run = create_run_record(store, body)
+    return run, store.read_json('optimizer/prompt_versions', run['baseline_version_id'])
+
+
+def test_observed_baseline_skips_api_but_candidate_and_final_are_fresh(tmp_path, monkeypatch):
+    calls = 0
+    async def fake(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        return json.dumps({'AI_Document': {'company_name': 'Billing Entity Ltd.'}})
+    monkeypatch.setattr('datara.optimizer.completion', fake)
+    with TestClient(create_app(tmp_path)) as client:
+        run, version = make_speed_case(client, observed=True)
+        service = client.app.state.optimizer_service
+        metrics, _, _ = asyncio.run(service._extract_version(run, version, 'baseline', None))
+        assert calls == 0 and metrics['failure_selected']['ratio'] == 0
+        record = client.app.state.store.read_json('optimizer/extractions', run['extraction_ids'][0])
+        assert record['evidence_source'] == 'observed_failure'
+        # Historical output must never masquerade as a cached real extraction.
+        assert service._cached_baseline(run, version, run['run_test_cases'][0], Connection(), [record]) is None
+        for phase in ['candidate', 'final_validation']:
+            metrics, _, _ = asyncio.run(service._extract_version(run, version, phase, None))
+            assert metrics['failure_selected']['ratio'] == 1
+        assert calls == 2
+
+
+def test_extractions_overlap_but_respect_concurrency_limit(tmp_path, monkeypatch):
+    active = peak = calls = 0
+    async def fake(*args, **kwargs):
+        nonlocal active, peak, calls
+        calls += 1; active += 1; peak = max(peak, active)
+        try:
+            await asyncio.sleep(0.015)
+            return json.dumps({'AI_Document': {'company_name': 'Billing Entity Ltd.'}})
+        finally:
+            active -= 1
+    monkeypatch.setattr('datara.optimizer.completion', fake)
+    with TestClient(create_app(tmp_path)) as client:
+        run, version = make_speed_case(client, count=5)
+        metrics, rows, _ = asyncio.run(client.app.state.optimizer_service._extract_version(run, version, 'candidate', None))
+        assert peak == 2 and active == 0 and calls == 5
+        assert metrics['failure_selected']['ratio'] == 1
+        assert [r['test_case_name'] for r in rows] == [f'case-{i}' for i in range(5)]
+        assert run['progress']['completed_cases'] == 5
+
+
+def test_failed_parallel_case_cancels_inflight_requests(tmp_path, monkeypatch):
+    active = 0
+    started = None
+    async def scenario(service, run, version):
+        nonlocal started
+        started = asyncio.Event()
+        with pytest.raises(ValueError, match='HTTP 401'):
+            await service._extract_version(run, version, 'candidate', None)
+        assert active == 0
+    async def fake(connection, key, instructions, images, **kwargs):
+        nonlocal active
+        active += 1
+        try:
+            if active == 1:
+                await started.wait()
+                raise ValueError('HTTP 401')
+            started.set()
+            await asyncio.Event().wait()
+        finally:
+            active -= 1
+    monkeypatch.setattr('datara.optimizer.completion', fake)
+    with TestClient(create_app(tmp_path)) as client:
+        run, version = make_speed_case(client, count=2)
+        asyncio.run(scenario(client.app.state.optimizer_service, run, version))
+
+
+def test_optimizer_deadline_includes_retry_backoff(tmp_path, monkeypatch):
+    async def fake(*args, **kwargs):
+        raise ValueError('HTTP 429')
+    monkeypatch.setattr('datara.optimizer.completion', fake)
+    service = PromptOptimizerService(Store(tmp_path), lambda: Connection(), lambda: 'key')
+    with pytest.raises(ValueError, match='总等待超过'):
+        asyncio.run(service._complete(Connection().model_copy(update={'timeout': 0.03}), 'task', []))
