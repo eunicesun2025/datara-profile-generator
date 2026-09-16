@@ -197,7 +197,7 @@ function renderTest() {
     ${stale?'<div class="notice warning">这份结果对应先前的字段定义或样本。请重新测试当前版本。</div>':''}
     ${r?.error?`<div class="notice error">${esc(r.error)}</div>`:''}
     ${r?.validation?issuesHTML(r.validation):''}
-    <section class="panel"><div class="panel-head"><h3>提取结果</h3>${r?`<span class="result-status">${r.status==='running'?'处理中…':r.validation?.status==='not_matched'?'文档不匹配':r.validation?.status==='valid'?'结构校验通过':r.validation?.status==='invalid'?'结果需要修正':esc(r.status)}</span>`:'<span class="inline-note">尚未测试</span>'}</div>
+    <section class="panel"><div class="panel-head"><h3>提取结果</h3>${r?`<span class="result-status">${r.status==='running'?`处理中… <span id="job-elapsed"></span>`:r.validation?.status==='not_matched'?'文档不匹配':r.validation?.status==='valid'?'结构校验通过':r.validation?.status==='invalid'?'结果需要修正':esc(r.status)}</span>`:'<span class="inline-note">尚未测试</span>'}</div>
     ${r?.raw?`<pre>${esc(r.result?json(r.result):r.raw)}</pre><div class="panel-content"><p class="helper">${esc(r.model)} · ${esc(new Date(r.started_at).toLocaleString('zh-CN'))}<br>结构校验通过不代表值一定正确，请对照样本确认。</p></div>`:`<div class="test-empty"><div class="upload-icon">⌘</div><h3>让样本验证你的定义</h3><p>配置视觉模型后运行提取。这里会展示原始结果，以及缺失键、类型和日期格式检查。</p><button class="small" data-action="manual-result">粘贴已有 JSON 进行校验</button></div>`}</section>
     ${r?.raw?'<button class="small ghost" data-action="manual-result">粘贴其他 JSON 进行校验</button>':''}
     ${state.history.length?`<details><summary class="details-toggle">最近测试记录</summary>${state.history.filter(r=>r.kind==='extract').map(r=>`<button class="small" data-action="history" data-id="${r.id}">${esc(new Date(r.started_at).toLocaleString('zh-CN'))} · ${esc(r.status)}</button>`).join('')}</details>`:''}</div></div>`;
@@ -354,15 +354,27 @@ async function startJob(kind,instructions='') {
   state.job=await api('/jobs',{profile:state.profile,sample_id:state.sample.id,kind,instructions});
   if(kind==='extract')state.view='test';
   render();
-  toast(kind==='draft'?'AI 已开始分析，视觉模型通常需要 1–2 分钟':'AI 已开始提取');
+  toast(kind==='draft'?'AI 已开始分析，视觉模型通常需要 1–2 分钟':'AI 已开始提取；多页发票可能需要数分钟，计时器走动即表示仍在等待模型');
   pollJob(state.job.id);
+}
+// A vision request can legitimately take several minutes. Without a moving clock the
+// 测试提取 view was indistinguishable from a hang, so runs that were still healthy got
+// cancelled. Only the timer node is touched: re-rendering the whole view every 1.5s
+// would flicker and steal focus from any control the user is interacting with.
+function elapsedText(iso) {
+  const s=Math.max(0,Math.round((Date.now()-new Date(iso).getTime())/1000));
+  return s<60?`已等待 ${s} 秒`:`已等待 ${Math.floor(s/60)} 分 ${s%60} 秒`;
+}
+function updateJobElapsed(startedAt) {
+  const el=document.getElementById('job-elapsed');
+  if(el&&startedAt)el.textContent=elapsedText(startedAt);
 }
 async function pollJob(id) {
   try {
     const r=await api('/jobs/'+id);
     if(state.job?.id!==id)return;
     state.job=r;
-    if(r.status==='running'){pollTimer=setTimeout(()=>pollJob(id),1500);return;}
+    if(r.status==='running'){updateJobElapsed(r.started_at);pollTimer=setTimeout(()=>pollJob(id),1500);return;}
     state.history=[r,...state.history.filter(x=>x.id!==id)].slice(0,10);render();
     if(r.status==='failed'||r.status==='cancelled'){toast(r.error,r.status==='failed'?'error':'warning');return;}
     if(r.kind==='draft'&&r.status==='completed') {

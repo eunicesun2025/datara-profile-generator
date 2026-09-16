@@ -7,7 +7,8 @@ import ssl
 from pydantic import ValidationError
 
 from datara.domain import new_profile
-from datara.provider import Connection, completion, parse_draft
+from datara.provider import (Connection, classify_transient, completion, completion_retrying,
+                             parse_draft)
 
 
 def test_connection_allows_long_vision_timeout():
@@ -176,4 +177,75 @@ def test_read_timeout_is_still_reported_as_a_request_timeout(monkeypatch):
         transport=httpx.MockTransport(handler), **kw))
     with pytest.raises(ValueError, match='模型请求超时'):
         asyncio.run(completion(Connection(), 'test-key', 'task', []))
+
+
+@pytest.mark.parametrize("message,expected", [
+    # The reclassified 15 second connect failure: cheap to retry, so one extra attempt.
+    ("无法连接模型端点：建立连接超过 15 秒连接超时（企业代理握手缓慢或网络抖动），可重试", (True, 2)),
+    ("无法连接模型端点，请检查网络和 API 地址", (True, 2)),
+    # A response timeout already burned the whole configured timeout; never repeat it.
+    ("模型请求超时，可调整超时设置后重试", (True, 1)),
+    ("模型接口返回 HTTP 503。请检查地址、模型、图片能力及账号额度。", (True, 3)),
+    # Permanent problems must not consume the retry budget or delay the real error.
+    ("模型接口返回 HTTP 401：API Key 认证失败。", (False, 1)),
+    ("模型输出达到长度上限；请增加最大输出长度或减少样本范围", (False, 1)),
+])
+def test_classify_transient_matches_the_optimizer_retry_budget(message, expected):
+    """The shared classifier must reproduce the budget the optimizer always used."""
+    assert classify_transient(message) == expected
+
+
+def test_completion_retrying_recovers_from_a_transient_connect_timeout(monkeypatch):
+    """One proxy blip must not fail an interactive 测试提取 run.
+
+    run_job used to call completion() exactly once, so a 15 second ConnectTimeout
+    aborted the job even though its own error text told the user it was retryable.
+    """
+    real_client = httpx.AsyncClient
+    calls = {"n": 0}
+
+    def handler(request):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise httpx.ConnectTimeout('timed out')
+        return httpx.Response(200, json={"choices": [{"finish_reason": "stop",
+                                                      "message": {"content": '{"ok":true}'}}]})
+
+    monkeypatch.setattr('datara.provider.httpx.AsyncClient', lambda **kw: real_client(
+        transport=httpx.MockTransport(handler), **kw))
+    assert asyncio.run(completion_retrying(Connection(), 'test-key', 'task', [])) == '{"ok":true}'
+    assert calls["n"] == 2
+
+
+def test_completion_retrying_does_not_repeat_a_full_response_timeout(monkeypatch):
+    """Retrying a read timeout would make one sample look stuck for twice the timeout."""
+    real_client = httpx.AsyncClient
+    calls = {"n": 0}
+
+    def handler(request):
+        calls["n"] += 1
+        raise httpx.ReadTimeout('timed out')
+
+    monkeypatch.setattr('datara.provider.httpx.AsyncClient', lambda **kw: real_client(
+        transport=httpx.MockTransport(handler), **kw))
+    with pytest.raises(ValueError, match='模型请求超时'):
+        asyncio.run(completion_retrying(Connection(), 'test-key', 'task', []))
+    assert calls["n"] == 1
+
+
+def test_completion_retrying_gives_up_after_the_connection_budget(monkeypatch):
+    """Connection failures are bounded: two attempts total, then the real error surfaces."""
+    real_client = httpx.AsyncClient
+    calls = {"n": 0}
+
+    def handler(request):
+        calls["n"] += 1
+        raise httpx.ConnectTimeout('timed out')
+
+    monkeypatch.setattr('datara.provider.httpx.AsyncClient', lambda **kw: real_client(
+        transport=httpx.MockTransport(handler), **kw))
+    with pytest.raises(ValueError, match='无法连接模型端点'):
+        asyncio.run(completion_retrying(Connection(), 'test-key', 'task', []))
+    assert calls["n"] == 2
+
 

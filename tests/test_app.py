@@ -120,12 +120,12 @@ def test_unknown_mapping_source_is_not_marked_reviewed():
 
 
 def test_async_vision_job_records_validation_without_credentials(client, monkeypatch):
-    async def fake_completion(c,key,instructions,images):
+    async def fake_completion(c,key,instructions,images,reference_text=""):
         assert key == "test-only-key"
         assert images and images[0].exists()
         assert "file_id" not in instructions
         return '{"AI_Document":{"amount":null}}'
-    monkeypatch.setattr("datara.app.completion",fake_completion)
+    monkeypatch.setattr("datara.app.completion_retrying",fake_completion)
     client.post("/api/settings",json={"base_url":"https://example.test/v1","model":"test","api_key":"test-only-key"})
     sample=client.post("/api/samples",files={"file":("a.png",image_bytes())}).json()
     p=new_profile();p.tables[0].fields.append(FieldDef(name="amount",data_type="Decimal",is_required=True))
@@ -138,3 +138,29 @@ def test_async_vision_job_records_validation_without_credentials(client, monkeyp
     assert result["validation"]["status"] == "valid"
     assert result["validation"]["warnings"]
     assert "test-only-key" not in client.app.state.store.path("tests",job["id"]).read_text()
+
+
+def test_extract_job_survives_a_transient_connection_failure(client, monkeypatch):
+    """Wiring check: run_job must call the model through the retrying wrapper.
+
+    A single 15 second connect timeout from a corporate proxy used to fail the whole
+    测试提取 run, even though the message shown to the user said it was retryable.
+    """
+    calls={"n":0}
+    async def flaky(c,key,instructions,images,reference_text=""):
+        calls["n"]+=1
+        if calls["n"]==1:
+            raise ValueError("无法连接模型端点：建立连接超过 15 秒连接超时（企业代理握手缓慢或网络抖动），可重试")
+        return '{"AI_Document":{"amount":null}}'
+    monkeypatch.setattr("datara.provider.completion",flaky)
+    client.post("/api/settings",json={"base_url":"https://example.test/v1","model":"test","api_key":"test-only-key"})
+    sample=client.post("/api/samples",files={"file":("a.png",image_bytes())}).json()
+    p=new_profile();p.tables[0].fields.append(FieldDef(name="amount",data_type="Decimal",is_required=True))
+    job=client.post("/api/jobs",json={"profile":p.model_dump(),"sample_id":sample["id"],"kind":"extract"}).json()
+    result={}
+    for _ in range(120):
+        result=client.get("/api/jobs/"+job["id"]).json()
+        if result["status"] != "running": break
+        time.sleep(.05)
+    assert calls["n"] == 2
+    assert result["status"] == "completed"

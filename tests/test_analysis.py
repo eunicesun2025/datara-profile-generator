@@ -168,7 +168,7 @@ def test_reference_analysis_job_end_to_end(tmp_path, monkeypatch):
         assert images and "单据类型" in instructions
         return json.dumps({"profile": {"accepted_documents": "发票"}, "fields": [
             {"table_name": "AI_Document", "name": "InvoiceDate", "data_type": "String"}]})
-    monkeypatch.setattr("datara.app.completion", fake_completion)
+    monkeypatch.setattr("datara.app.completion_retrying", fake_completion)
     with TestClient(create_app(tmp_path)) as client:
         ref = client.post("/api/references", files={"file": ("rules.txt", b"REFERENCE_ONLY")}).json()
         assert "text" not in ref

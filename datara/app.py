@@ -22,7 +22,8 @@ from .domain import (DEFAULT_SQL, SYSTEM, FieldDef, Model, Profile, TableDef, js
 from .generators import export_zip, fingerprint, preview, prompt
 from .importer import inspect_workbook, parse_fields
 from .media import render_pages
-from .provider import Connection, ConnectionUpdate, completion, draft_prompt, parse_analysis, validate_connection
+from .provider import (Connection, ConnectionUpdate, completion, completion_retrying, draft_prompt,
+                       parse_analysis, validate_connection)
 from .references import reference_text, MAX_TEXT
 from .storage import Conflict, Store
 from .optimizer import ensure_prompt_version
@@ -306,9 +307,13 @@ def create_app(data_dir: Path | None = None):
             images = [folder / f"{i}.jpg" for i in range(1, meta["pages"] + 1)]
             instructions = prompt(body.profile) if body.kind == "extract" else draft_prompt(body.profile, body.instructions)
             if body.kind == "draft" and body.profile.reference_ids:
-                raw = await completion(c, key, instructions, images, reference_text=analysis_references(body.profile))
+                raw = await completion_retrying(c, key, instructions, images,
+                                                reference_text=analysis_references(body.profile))
             else:
-                raw = await completion(c, key, instructions, images)
+                # Interactive extract/draft jobs used to make a single call, so one
+                # transient 15 second connect timeout from a corporate proxy failed the
+                # whole 测试提取 run even though the error text said it was retryable.
+                raw = await completion_retrying(c, key, instructions, images)
             record["raw"] = raw
             if body.kind == "draft":
                 record.update(parse_analysis(raw, body.profile))

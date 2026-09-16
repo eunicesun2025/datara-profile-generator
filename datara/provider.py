@@ -38,6 +38,55 @@ def validate_connection(c: Connection):
         raise ValueError("请填写端点实际支持的模型 ID")
 
 
+# Transient model failures that are worth another attempt. Shared by the optimizer
+# and by the interactive extract/draft jobs so a flaky corporate proxy is handled
+# identically on every code path that calls the model.
+TRANSIENT_TOKENS = ("HTTP 429", "HTTP 500", "HTTP 502", "HTTP 503", "HTTP 504",
+                    "请求超时", "无法连接模型端点")
+
+
+def classify_transient(message: str) -> tuple[bool, int]:
+    """Return ``(is_transient, max_attempts)`` for a user-facing model error message.
+
+    ``max_attempts`` includes the first try, so ``1`` means "do not retry".
+    A real response timeout may already have consumed the whole configured timeout
+    (10-30 minutes of vision generation), so retrying the identical large request
+    would make one failed sample look like a task stuck for twice the timeout.
+    Connection failures are cheap -- they are bounded by the fixed 15 second connect
+    timeout -- and are the classic symptom of a transparent corporate proxy that
+    re-signs TLS, so they get one retry. Gateway 429/5xx get two.
+    """
+    if not any(token in message for token in TRANSIENT_TOKENS):
+        return False, 1
+    if "请求超时" in message:
+        return True, 1
+    if "无法连接" in message:
+        return True, 2
+    return True, 3
+
+
+async def completion_retrying(c: Connection, key: str, instructions: str,
+                              images: list[Path], reference_text: str = "") -> str:
+    """Call :func:`completion`, retrying only the transient failures it classifies.
+
+    ``asyncio.CancelledError`` derives from ``BaseException``, not ``ValueError``, so a
+    user cancel still aborts immediately instead of being silently retried.
+    """
+    attempts = 0
+    while True:
+        attempts += 1
+        try:
+            return await completion(c, key, instructions, images, reference_text=reference_text)
+        except ValueError as exc:
+            message = str(exc)
+            transient, limit = classify_transient(message)
+            if not transient or attempts >= limit:
+                raise
+            logger.warning("model_retry model=%s attempt=%d max_attempts=%d reason=%s",
+                           c.model, attempts, limit, message)
+            await asyncio.sleep(min(2 ** (attempts - 1), 4))
+
+
 async def completion(c: Connection, key: str, instructions: str, images: list[Path], reference_text: str = "") -> str:
     validate_connection(c)
     key = key.strip()

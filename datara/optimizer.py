@@ -15,7 +15,7 @@ from .generators import (fingerprint, profile_with_field_rules, prompt, prompt_c
                          text_hash)
 from .optimizer_models import (CandidateResponse, ComparisonPolicy, OptimizationRunCreate,
                                TestCaseCreate)
-from .provider import Connection, completion
+from .provider import Connection, classify_transient, completion
 from .storage import Conflict, Store
 
 
@@ -648,14 +648,12 @@ class PromptOptimizerService:
                 return result, attempts
             except ValueError as exc:
                 message = str(exc)
-                transient = any(token in message for token in (
-                    "HTTP 429", "HTTP 500", "HTTP 502", "HTTP 503", "HTTP 504",
-                    "请求超时", "无法连接模型端点",
-                ))
-                # A model timeout may already have consumed 10–30 minutes. Retrying the
-                # identical large vision request here made one failed sample look like a
-                # task that was stuck for twice the configured timeout.
-                limit = 1 if "请求超时" in message else 2 if "无法连接" in message else 3
+                # Shared with the interactive extract/draft jobs so every model caller
+                # treats a flaky corporate proxy the same way. A model timeout may
+                # already have consumed 10–30 minutes; retrying the identical large
+                # vision request here made one failed sample look like a task that was
+                # stuck for twice the configured timeout.
+                transient, limit = classify_transient(message)
                 if not transient or attempts >= limit:
                     raise
                 logger.warning(

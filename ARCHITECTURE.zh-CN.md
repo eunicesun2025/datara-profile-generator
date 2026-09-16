@@ -70,7 +70,7 @@ flowchart LR
 | `datara/importer.py` | XLSX 安全限制、预览、完整 Mapping/普通列表解析和有限结构修复 | Mapping 回导无法恢复提取规则、SQL 覆盖和审核历史 |
 | `datara/media.py` | PDF/PNG/JPEG 转换为尺寸受控的 JPEG 页面 | 不做 OCR；PDF 渲染使用全局锁串行执行 |
 | `datara/references.py` | 读取 XLSX、DOCX、TXT、MD、JSON、CSV、SQL 为有界文本 | 不执行宏、公式、SQL 或文件内指令；扫描件需走样张路径 |
-| `datara/provider.py` | 模型连接配置、Chat Completions 多模态请求、分析提示词、返回解析与过滤 | 无重试、流式输出、原生 PDF、工具调用或协议级 JSON Schema |
+| `datara/provider.py` | 模型连接配置、Chat Completions 多模态请求、瞬时失败重试、分析提示词、返回解析与过滤 | 无流式输出、原生 PDF、工具调用或协议级 JSON Schema |
 | `datara/storage.py` | 安全路径、目录、原子 JSON 写入、Profile 列表/读取、乐观版本保存和优化版本分配 | 仅本地文件系统；可重入写锁只在单进程内有效 |
 | `datara/optimizer*.py`、`evaluation.py` | 固定优化状态机、测试/标准答案快照、字段比较、回归门禁、提示词版本、发布与回滚 | Qwen 只建议字段规则；应用代码负责变更、评分、选择和发布门禁 |
 | `scripts/diagnose.py` | 只读检查依赖、端口、数据目录、代理、CA 和可选端点 | 不读取 API Key，不上传文档 |
@@ -186,7 +186,7 @@ API Key 不写入 `connection.json`，只保存在当前进程内或来自环境
 | `timeout` | 600 秒 | 总请求超时 10–1800 秒；连接超时固定 15 秒 |
 | `max_tokens` | 4096 | 256–32768 |
 
-每次模型调用受两个独立时间预算约束。`timeout` 通过 `asyncio.timeout` 约束整个逻辑请求（含优化器的重试与退避），同时传给 HTTPX；连接建立另受固定 15 秒连接超时约束，且没有对应配置项。两类失败刻意分开上报：连接超时上报为「无法连接模型端点：建立连接超过 15 秒连接超时…」并保留一次重试；响应超时上报为「模型请求超时，可调整超时设置后重试」且不重试，因为它可能已耗尽全部预算。因此调高 `timeout` 无法解决连接阶段失败。`datara.provider` 会记录 `model_request_connect_timeout` 与 `model_request_network_error`，附带 HTTPX 原始异常类型，便于现场区分两者。
+每次模型调用受两个独立时间预算约束。`timeout` 通过 `asyncio.timeout` 约束整个逻辑请求（含优化器的重试与退避），同时传给 HTTPX；连接建立另受固定 15 秒连接超时约束，且没有对应配置项。两类失败刻意分开上报：连接超时上报为「无法连接模型端点：建立连接超过 15 秒连接超时…」并保留一次重试；响应超时上报为「模型请求超时，可调整超时设置后重试」且不重试，因为它可能已耗尽全部预算。因此调高 `timeout` 无法解决连接阶段失败。`datara.provider` 会记录 `model_request_connect_timeout` 与 `model_request_network_error`，附带 HTTPX 原始异常类型，便于现场区分两者。重试预算只在 `provider.classify_transient` 中定义一次，由优化器（`Optimizer._complete_attempts`）与交互式提取/分析任务（`provider.completion_retrying`，经 `app.run_job` 调用）共用；后者此前只调用模型一次，一次 15 秒代理抖动就会让整个测试提取失败，尽管其错误文案自称「可重试」。
 
 
 应用不自动读取 `.env`。启动脚本固定监听 `127.0.0.1:8765`。
@@ -216,7 +216,7 @@ API Key 不写入 `connection.json`，只保存在当前进程内或来自环境
 10. 结构修复按表第一次出现的定义为准；只能在父表唯一时补空父表。
 11. AI 可新增/更新现有表的 AI 字段和单据规则，但不能创建/分类新表。
 12. 表名、父表、来源/类型字符串的空白处理仍不完全一致。
-13. 任务不是持久队列；重启不续跑，也没有自动重试。
+13. 任务不是持久队列；重启不续跑，失败任务也不会重新入队。运行中任务的瞬时模型失败会按 `classify_transient` 重试，但该预算耗尽后任务即标记为 `failed`。
 14. 任务历史只保存指纹/提示词哈希，不保存完整请求快照。
 15. 损坏的 JSON 记录没有隔离/修复机制，可能影响启动或列表读取。
 16. 并非所有写入都原子：上传原件、导入 XLSX 和 ZIP 使用直接写入。
