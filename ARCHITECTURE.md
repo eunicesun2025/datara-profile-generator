@@ -211,11 +211,14 @@ Versions are bounded in `pyproject.toml` and concretely locked in `uv.lock`.
 | `DATARA_DATA_DIR` | `data` relative to the process working directory | Root for profiles, samples, references, imports, tests, exports, and `connection.json` | Environment only |
 | `DATARA_API_KEY` | empty | Initial API key loaded into `app.state.api_key` | Memory only; UI updates also remain memory-only |
 | `DATARA_ALLOWED_HOSTS` | empty | Comma-separated additions to `localhost`, `127.0.0.1`, `::1`, and `testserver` accepted by host middleware | Environment only |
+| `DATARA_LOG_LEVEL` | `WARNING` | Root logger level set by `configure_logging()` at import. `INFO` enables the `model_request_started` / `model_request_finished` timings from `datara.provider`. Unrecognised values fall back to `WARNING` and log a warning rather than aborting startup | Environment only |
 | `HTTP_PROXY`, `HTTPS_PROXY`, lowercase equivalents, `ALL_PROXY`, `NO_PROXY` | inherited/empty | Used by `httpx` because `trust_env=True` | Environment only |
 | `SSL_CERT_FILE`, `SSL_CERT_DIR` | inherited/empty | Supplies custom TLS trust locations to the HTTP stack | Environment only |
 | `PYTHONUTF8` | set to `1` by `run.cmd` only | Enables UTF-8 mode on Windows launcher runs | Process only |
 
-The application does not load `.env` files. `.env.example` documents only `DATARA_DATA_DIR` and `DATARA_API_KEY`; it omits `DATARA_ALLOWED_HOSTS` and the inherited networking variables.
+`app.py` calls `load_runtime_environment()` at import time, which loads `.env` from the process working directory with `override=False`, so variables already set by the operating system, container or CI always win. `.env.example` documents `DATARA_DATA_DIR`, `DATARA_API_KEY` and `DATARA_LOG_LEVEL`; it omits `DATARA_ALLOWED_HOSTS` and the inherited networking variables.
+
+`configure_logging()` runs immediately afterwards. It is required because uvicorn's `--log-level` only calls `setLevel` on `uvicorn.error`, `uvicorn.access` and `uvicorn.asgi` (`uvicorn/config.py:413-420`) and uvicorn's default `LOGGING_CONFIG` contains no `root` entry. Without it, `datara.provider` records propagate to a handler-less root logger and fall through to `logging.lastResort`, whose level is `WARNING`, so the model request timings are dropped even when `--log-level info` is passed. A root handler is added only when none exists, so pytest's logging plugin is left intact.
 
 ### Persisted connection settings
 

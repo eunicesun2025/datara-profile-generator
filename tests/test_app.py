@@ -1,5 +1,6 @@
 import io
 import json
+import logging
 import os
 import time
 
@@ -8,7 +9,8 @@ from fastapi.testclient import TestClient
 from openpyxl import Workbook
 from PIL import Image
 
-from datara.app import create_app, load_runtime_environment
+from datara.app import (configure_logging, create_app, load_runtime_environment,
+                        resolve_log_level)
 from datara.domain import FieldDef, new_profile
 from datara.importer import inspect_workbook, parse_fields
 
@@ -17,6 +19,16 @@ from datara.importer import inspect_workbook, parse_fields
 def client(tmp_path):
     with TestClient(create_app(tmp_path)) as c:
         yield c
+
+
+@pytest.fixture
+def restore_root_logger():
+    """Snapshot root logger state so level tests cannot leak into the rest of the suite."""
+    root = logging.getLogger()
+    level, handlers = root.level, list(root.handlers)
+    yield root
+    root.setLevel(level)
+    root.handlers[:] = handlers
 
 
 def test_project_env_loads_once_without_overriding_environment(tmp_path, monkeypatch):
@@ -31,6 +43,71 @@ def test_project_env_loads_once_without_overriding_environment(tmp_path, monkeyp
 
     assert os.environ["DATARA_API_KEY"] == "local-project-key"
     assert os.environ["DATARA_DATA_DIR"] == "deployment-data"
+
+
+@pytest.mark.parametrize("raw,expected", [
+    ("DEBUG", "DEBUG"),
+    ("info", "INFO"),          # 大小写不敏感，.env 里手写小写也应生效
+    ("  Warning  ", "WARNING"),  # 容忍空白
+    ("ERROR", "ERROR"),
+    ("CRITICAL", "CRITICAL"),
+    (None, "WARNING"),         # 未设置 → 默认，保持改动前的行为
+    ("", "WARNING"),           # .env 里留空 → 默认
+    ("verbose", "WARNING"),    # 拼错 → 默认，而不是启动崩溃
+])
+def test_resolve_log_level_accepts_known_names_and_falls_back(raw, expected):
+    assert resolve_log_level(raw) == expected
+
+
+def test_configure_logging_keeps_warning_by_default(monkeypatch, restore_root_logger):
+    """默认必须是 WARNING：否则本次改动会让所有部署突然开始刷屏。"""
+    monkeypatch.delenv("DATARA_LOG_LEVEL", raising=False)
+    assert configure_logging() == "WARNING"
+    assert restore_root_logger.level == logging.WARNING
+
+
+def test_configure_logging_enables_provider_diagnostics_at_info(monkeypatch, restore_root_logger):
+    """DATARA_LOG_LEVEL=INFO 必须让 datara.provider 的 INFO 记录真正可见。
+
+    回归防护：uvicorn 的 --log-level 只对 uvicorn.error/access/asgi 调 setLevel
+    (uvicorn/config.py:413-420)，从不配置 root。缺了 configure_logging() 时这些计时行会
+    落到 logging.lastResort(WARNING) 被丢弃 —— 这正是 600 秒代理阻塞当初无法定位的原因。
+    """
+    monkeypatch.setenv("DATARA_LOG_LEVEL", "INFO")
+    assert configure_logging() == "INFO"
+    assert logging.getLogger("datara.provider").getEffectiveLevel() == logging.INFO
+
+    seen = []
+    handler = logging.Handler()
+    handler.emit = seen.append
+    restore_root_logger.addHandler(handler)
+    try:
+        logging.getLogger("datara.provider").info("model_request_started")
+        logging.getLogger("datara.provider").debug("below-threshold")
+    finally:
+        restore_root_logger.removeHandler(handler)
+
+    # 只断言 INFO 那条：DEBUG 仍应低于阈值，证明级别是 INFO 而不是被放成 DEBUG。
+    assert [r.getMessage() for r in seen] == ["model_request_started"]
+
+
+def test_configure_logging_does_not_duplicate_root_handlers(monkeypatch, restore_root_logger):
+    """重复调用不得叠加 handler，否则每行日志会被打印多次。"""
+    monkeypatch.setenv("DATARA_LOG_LEVEL", "INFO")
+    configure_logging()
+    first = len(restore_root_logger.handlers)
+    configure_logging()
+    configure_logging()
+    assert len(restore_root_logger.handlers) == first
+
+
+def test_configure_logging_warns_about_an_unusable_level(monkeypatch, restore_root_logger, caplog):
+    """拼错的级别要给出可见提示，而不是静默按 WARNING 运行让人以为设置生效了。"""
+    monkeypatch.setenv("DATARA_LOG_LEVEL", "verbose")
+    with caplog.at_level(logging.WARNING, logger="datara.app"):
+        assert configure_logging() == "WARNING"
+    assert any("DATARA_LOG_LEVEL" in r.getMessage() and "verbose" in r.getMessage()
+               for r in caplog.records)
 
 
 def test_save_reload_conflict_and_export(client):

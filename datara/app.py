@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import logging
 import os
 import shutil
 from contextlib import asynccontextmanager
@@ -34,7 +35,50 @@ def load_runtime_environment(root: Path | None = None) -> None:
     load_dotenv((root or Path.cwd()) / ".env", override=False, encoding="utf-8")
 
 
+# Accepted DATARA_LOG_LEVEL values. An unrecognised value falls back to WARNING instead of
+# aborting startup: a typo in a logging setting must never take the service down.
+LOG_LEVELS = ("DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL")
+DEFAULT_LOG_LEVEL = "WARNING"
+LOG_FORMAT = "%(asctime)s %(levelname)s %(name)s %(message)s"
+
+
+def resolve_log_level(raw: str | None) -> str:
+    """Map a raw DATARA_LOG_LEVEL value to a known level name, defaulting to WARNING."""
+    name = (raw or "").strip().upper()
+    return name if name in LOG_LEVELS else DEFAULT_LOG_LEVEL
+
+
+def configure_logging() -> str:
+    """Point the root logger at DATARA_LOG_LEVEL and return the resolved level name.
+
+    Uvicorn's ``--log-level`` only calls ``setLevel`` on ``uvicorn.error``,
+    ``uvicorn.access`` and ``uvicorn.asgi`` (uvicorn/config.py:413-420) and its default
+    ``LOGGING_CONFIG`` has no ``root`` entry, so the root logger is never configured.
+    Application loggers such as ``datara.provider`` then propagate to a handler-less root
+    and fall through to ``logging.lastResort``, whose level is WARNING. That silently drops
+    the ``model_request_started`` / ``model_request_finished`` timings, which are the only
+    evidence that distinguishes a slow model from a stalled corporate proxy.
+
+    A handler is added only when the root has none, so repeated calls and hosts that
+    already installed one (pytest's logging plugin) are left untouched.
+    """
+    raw = os.environ.get("DATARA_LOG_LEVEL")
+    level_name = resolve_log_level(raw)
+    root = logging.getLogger()
+    root.setLevel(getattr(logging, level_name))
+    if not root.handlers:
+        handler = logging.StreamHandler()
+        handler.setFormatter(logging.Formatter(LOG_FORMAT))
+        root.addHandler(handler)
+    requested = (raw or "").strip()
+    if requested and requested.upper() not in LOG_LEVELS:
+        logging.getLogger(__name__).warning(
+            "DATARA_LOG_LEVEL=%r 无法识别，已回退到 %s", raw, DEFAULT_LOG_LEVEL)
+    return level_name
+
+
 load_runtime_environment()
+configure_logging()
 
 STATIC = Path(__file__).parent / "static"
 

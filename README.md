@@ -111,6 +111,8 @@ export DATARA_DATA_DIR='/your/private/data-directory'
 
 模型请求读取 HTTPS_PROXY / HTTP_PROXY / NO_PROXY 和 SSL_CERT_FILE / SSL_CERT_DIR，保持 TLS 验证；详见跨平台指南。模型的图片数量、容量与 token 限制由实际端点决定；应用另有 18MB 图片总量限制，会报错而非丢页。
 
+排查模型调用缓慢或疑似卡死时，在 `.env` 中设置 `DATARA_LOG_LEVEL=INFO` 后重启，日志会输出每次模型请求的 `model_request_started`（模型、图片数、字节数、字符数、超时）与 `model_request_finished`（实际耗时）。有 `finished` 行说明请求已返回，只有 `started` 而长时间没有 `finished` 说明连接被代理或网络挂住。默认 `WARNING` 不输出这些行。注意 uvicorn 的 `--log-level` 参数对本应用日志无效，它只影响 uvicorn 自身的日志器。
+
 ## 本地数据
 
 默认在工作目录 `data/` 下保存，已加入 `.gitignore`：

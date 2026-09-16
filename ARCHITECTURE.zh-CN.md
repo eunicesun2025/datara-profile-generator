@@ -173,9 +173,12 @@ API Key 不写入 `connection.json`，只保存在当前进程内或来自环境
 | `DATARA_DATA_DIR` | `data` | Profile、样张、参考、导入、测试、导出及连接配置根目录 |
 | `DATARA_API_KEY` | 空 | 启动时注入内存中的 API Key |
 | `DATARA_ALLOWED_HOSTS` | 空 | 在本地默认 Host 白名单外追加允许 Host |
+| `DATARA_LOG_LEVEL` | `WARNING` | 根日志器级别，导入时由 `configure_logging()` 设置。设为 `INFO` 可输出 `datara.provider` 的 `model_request_started` / `model_request_finished` 计时行。无法识别的值回退 `WARNING` 并记一条警告，不会导致启动失败 |
 | `HTTP_PROXY`、`HTTPS_PROXY`、`ALL_PROXY`、`NO_PROXY` 及小写形式 | 继承 | `httpx` 网络代理 |
 | `SSL_CERT_FILE`、`SSL_CERT_DIR` | 继承 | 企业 TLS 信任链 |
 | `PYTHONUTF8` | Windows 启动脚本设置为 `1` | Windows UTF-8 模式 |
+
+`app.py` 在导入时调用 `load_runtime_environment()` 读取工作目录下的 `.env`，且 `override=False`，因此操作系统、容器或 CI 已设置的环境变量始终优先。紧接着调用 `configure_logging()`：uvicorn 的 `--log-level` 只对 `uvicorn.error`、`uvicorn.access`、`uvicorn.asgi` 调 `setLevel`（`uvicorn/config.py:413-420`），其默认 `LOGGING_CONFIG` 也没有 `root` 条目，因此不配置根日志器时 `datara.provider` 的记录会传播到无 handler 的 root 并落到 `logging.lastResort`（级别 WARNING），即使传了 `--log-level info` 也会被丢弃。仅在 root 尚无 handler 时才添加，避免干扰 pytest 的日志插件。
 
 `connection.json` 保存非敏感设置：
 
