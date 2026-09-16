@@ -470,6 +470,47 @@ def test_optimizer_does_not_repeat_a_full_model_timeout(tmp_path, monkeypatch):
     assert calls == 1
 
 
+def test_optimizer_retries_a_connection_setup_failure(tmp_path, monkeypatch):
+    """A connect timeout costs 15 seconds, not the whole budget, so it gets one retry."""
+    calls = 0
+
+    async def connect_timeout(connection, key, instructions, images, reference_text=""):
+        nonlocal calls
+        calls += 1
+        raise ValueError("无法连接模型端点：建立连接超过 15 秒连接超时（企业代理握手缓慢或网络抖动），可重试")
+
+    async def no_wait(_):
+        return None
+
+    monkeypatch.setattr("datara.optimizer.completion", connect_timeout)
+    monkeypatch.setattr("datara.optimizer.asyncio.sleep", no_wait)
+    service = PromptOptimizerService(Store(tmp_path), lambda: Connection(), lambda: "key")
+    with pytest.raises(ValueError, match="无法连接模型端点"):
+        asyncio.run(service._complete(Connection(timeout=600), "task", []))
+    assert calls == 2
+
+
+def test_optimizer_recovers_when_the_second_connection_attempt_works(tmp_path, monkeypatch):
+    calls = 0
+
+    async def flaky_connect(connection, key, instructions, images, reference_text=""):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise ValueError("无法连接模型端点：建立连接超过 15 秒连接超时（企业代理握手缓慢或网络抖动），可重试")
+        return "{}"
+
+    async def no_wait(_):
+        return None
+
+    monkeypatch.setattr("datara.optimizer.completion", flaky_connect)
+    monkeypatch.setattr("datara.optimizer.asyncio.sleep", no_wait)
+    service = PromptOptimizerService(Store(tmp_path), lambda: Connection(), lambda: "key")
+    raw, attempts = asyncio.run(service._complete(Connection(timeout=600), "task", []))
+    assert raw == "{}" and attempts == 2
+
+
+
 def test_candidate_evaluation_timeout_preserves_candidate_and_fails_iteration(
         tmp_path, monkeypatch, caplog):
     field_id = None
@@ -537,6 +578,75 @@ def test_candidate_evaluation_timeout_preserves_candidate_and_fails_iteration(
         assert "optimizer_candidate_completed" in messages
         assert "optimizer_run_failed" in messages
         assert "optimizer-key" not in messages
+
+
+def test_candidate_connection_failure_is_retried_and_not_reported_as_a_timeout(
+        tmp_path, monkeypatch, caplog):
+    """Guards the field bug: a 15 second connect timeout surfaced as
+    "（单次超时 600 秒）：模型请求超时" and, being classified as a timeout, was never
+    retried, so one transient proxy handshake failed the whole optimization run."""
+    field_id = None
+    evaluation_calls = 0
+
+    async def fake_completion(connection, key, instructions, images, reference_text=""):
+        nonlocal evaluation_calls
+        if "Datara 字段级提取提示词优化器" in instructions:
+            return json.dumps({
+                "analyses": [],
+                "candidate_rules": [{
+                    "field_id": field_id,
+                    "old_rule_hash": hashlib.sha256(b"").hexdigest(),
+                    "new_rule": "提取购买方完整公司名称，并排除页眉中的开票方。",
+                    "reason": "修复公司角色混淆。",
+                }],
+            })
+        if "排除页眉中的开票方" in instructions:
+            evaluation_calls += 1
+            raise ValueError("无法连接模型端点：建立连接超过 15 秒连接超时（企业代理握手缓慢或网络抖动），可重试")
+        return json.dumps({"AI_Document": {"company_name": "正确公司"}})
+
+    monkeypatch.setattr("datara.optimizer.completion", fake_completion)
+    caplog.set_level("INFO", logger="datara.optimizer")
+    with TestClient(create_app(tmp_path)) as client:
+        client.post("/api/settings", json={
+            "base_url": "https://example.test/v1", "model": "extract-model",
+            "optimizer_model": "optimizer-model", "extraction_model": "extract-model",
+            "timeout": 600, "api_key": "optimizer-key",
+        })
+        profile = new_profile("Candidate connect failure")
+        company = FieldDef(name="company_name")
+        profile.tables[0].fields.insert(0, company)
+        field_id = company.id
+        profile = client.post("/api/profiles/save", json=profile.model_dump()).json()
+        sample = client.post(
+            "/api/samples", files={"file": ("invoice.png", image_bytes())}).json()
+        case = client.post(f"/api/optimizer/profiles/{profile['id']}/test-cases", json={
+            "sample_id": sample["id"], "name": "Huizhou invoice",
+            "dataset_role": "failure",
+            "ground_truth": {"AI_Document": {"company_name": "正确公司"}},
+            "observed_output": {"AI_Document": {"company_name": "错误公司"}},
+        }).json()
+        run = client.post("/api/optimizer/runs", json={
+            "profile_id": profile["id"], "profile_revision": profile["revision"],
+            "selected_field_ids": [field_id], "failure_test_case_ids": [case["id"]],
+            "settings": {"max_iterations": 1},
+        }).json()
+        for _ in range(200):
+            result = client.get("/api/optimizer/runs/" + run["id"]).json()
+            if result["status"] not in {"queued", "baselining", "optimizing", "validating"}:
+                break
+            time.sleep(0.01)
+
+        assert result["status"] == "failed"
+        reason = result["blocking_reasons"][0]
+        assert "候选提示词评估失败" in reason
+        assert "无法连接模型端点" in reason
+        assert "单次超时" not in reason
+        assert evaluation_calls == 2
+        messages = "\n".join(record.getMessage() for record in caplog.records)
+        assert "optimizer_model_retry" in messages
+        assert "optimizer-key" not in messages
+
 
 
 def test_optimizer_workflow_promote_and_version_history(tmp_path, monkeypatch):

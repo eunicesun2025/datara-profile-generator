@@ -103,9 +103,24 @@ async def completion(c: Connection, key: str, instructions: str, images: list[Pa
         if not isinstance(result, str):
             raise ValueError("模型未返回文本内容；请检查接口是否兼容 Chat Completions")
         return result
+    except httpx.ConnectTimeout as e:
+        # Connection setup is bounded by the fixed 15 second connect timeout above,
+        # not by Connection.timeout. Transparent corporate proxies that re-sign TLS
+        # can exceed it once and succeed immediately afterwards. httpx reports it as
+        # a TimeoutException subclass, so without this branch it was labelled as a
+        # model response timeout: that advises the wrong setting and, through the
+        # "请求超时" retry rule in the optimizer, cancels the retry budget entirely.
+        logger.warning("model_request_connect_timeout model=%s connect_timeout_seconds=15 error=%s: %s",
+                       c.model, type(e).__name__, e)
+        raise ValueError("无法连接模型端点：建立连接超过 15 秒连接超时（企业代理握手缓慢或网络抖动），可重试") from e
     except (httpx.TimeoutException, TimeoutError) as e:
         raise ValueError("模型请求超时，可调整超时设置后重试") from e
     except httpx.HTTPError as e:
+        # Keep the transport-level type visible. The user-facing messages below are
+        # deliberately generic, which made ConnectError and RemoteProtocolError
+        # indistinguishable when diagnosing failures in the field.
+        logger.warning("model_request_network_error model=%s error=%s: %s",
+                       c.model, type(e).__name__, e)
         cause = e
         seen = set()
         while cause is not None and id(cause) not in seen:

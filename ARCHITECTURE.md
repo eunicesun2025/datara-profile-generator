@@ -228,6 +228,9 @@ The application does not load `.env` files. `.env.example` documents only `DATAR
 | `timeout` | `600` seconds | 10–1800 seconds overall; connect timeout is separately fixed at 15 seconds |
 | `max_tokens` | `4096` | 256–32768; sent as `max_tokens` |
 
+Two independent time budgets apply to every model call. `timeout` bounds the whole logical request, including optimizer retries and backoff, through `asyncio.timeout`, and is also passed to HTTPX. Connection setup is separately bounded by a fixed 15 second connect timeout that has no configuration field. The two failures are reported differently on purpose: a connect timeout surfaces as `无法连接模型端点：建立连接超过 15 秒连接超时…` and keeps one retry, whereas a response timeout surfaces as `模型请求超时，可调整超时设置后重试` and is not retried because it may already have consumed the entire budget. Raising `timeout` therefore cannot fix a connect-phase failure. `datara.provider` logs `model_request_connect_timeout` and `model_request_network_error` with the underlying HTTPX exception type so the two stay distinguishable in the field.
+
+
 HTTP (without TLS) is accepted by validation. Redirect following is disabled. The supplied launchers hard-code `127.0.0.1:8765`; there is no application environment variable for listen address or port.
 
 ## Validation, security, and operational boundaries

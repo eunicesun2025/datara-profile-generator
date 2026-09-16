@@ -733,9 +733,17 @@ class PromptOptimizerService:
                         "candidate": "候选提示词评估",
                         "final_validation": "最终验证",
                     }.get(phase, phase)
+                    # This wrapper used to claim a per-request timeout for every
+                    # failure, including TLS and connection-setup errors, which sent
+                    # users to the wrong setting. Only add the budget note when the
+                    # cause is a provider timeout that does not already state its
+                    # own bound (the retry-inclusive message from _complete does).
+                    message = str(exc)
+                    budget = (f"（单次超时 {connection.timeout} 秒）"
+                              if "请求超时" in message and "秒" not in message else "")
                     raise ValueError(
                         f"{phase_name}失败：案例「{case['name']}」调用文档提取模型 "
-                        f"{connection.model} 时出错（单次超时 {connection.timeout} 秒）：{exc}"
+                        f"{connection.model} 时出错{budget}：{message}"
                     ) from exc
                 try:
                     parsed = strict_json(raw)

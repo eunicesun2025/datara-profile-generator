@@ -141,3 +141,39 @@ def test_total_deadline_stops_a_response_that_keeps_sending_chunks(monkeypatch):
     connection = Connection().model_copy(update={'timeout': 0.03})
     with pytest.raises(ValueError, match='请求超时'):
         asyncio.run(completion(connection, 'test-key', 'task', []))
+
+
+def test_connect_timeout_is_reported_as_a_connection_failure(monkeypatch):
+    """The fixed 15 second connect timeout must not be labelled a model response timeout.
+
+    The optimizer grants a retry only for messages containing "无法连接" and suppresses
+    it for "请求超时", so both assertions below guard the retry budget as well as the
+    wording shown to the user.
+    """
+    real_client = httpx.AsyncClient
+
+    def handler(request):
+        raise httpx.ConnectTimeout('timed out')
+
+    monkeypatch.setattr('datara.provider.httpx.AsyncClient', lambda **kw: real_client(
+        transport=httpx.MockTransport(handler), **kw))
+    with pytest.raises(ValueError) as error:
+        asyncio.run(completion(Connection(), 'test-key', 'task', []))
+    message = str(error.value)
+    assert '无法连接模型端点' in message
+    assert '15 秒连接超时' in message
+    assert '请求超时' not in message
+
+
+def test_read_timeout_is_still_reported_as_a_request_timeout(monkeypatch):
+    """Only the connect phase is reclassified; a slow response keeps the timeout wording."""
+    real_client = httpx.AsyncClient
+
+    def handler(request):
+        raise httpx.ReadTimeout('timed out')
+
+    monkeypatch.setattr('datara.provider.httpx.AsyncClient', lambda **kw: real_client(
+        transport=httpx.MockTransport(handler), **kw))
+    with pytest.raises(ValueError, match='模型请求超时'):
+        asyncio.run(completion(Connection(), 'test-key', 'task', []))
+
