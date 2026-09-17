@@ -145,6 +145,8 @@ The browser debounces edits and posts the Profile to `/api/preview`. The API nor
 
 `Store.save()` compares the submitted revision with the persisted revision while holding a process-local lock. A successful save increments `revision`, stamps UTC `updated_at`, and atomically replaces the Profile JSON. The save endpoint does not require a valid Profile.
 
+After the Profile is written, `ensure_prompt_version()` keeps the active prompt baseline consistent. Validity is decided by `prompt_fingerprint()`, which hashes only prompt-relevant content (table names, field order, prompt headings, field attributes, and AI extraction rules). Workspace-only state therefore never invalidates the baseline: attaching a sample, selecting a reference file, or renaming the database does not create a prompt version. When prompt-relevant content did change, an imported baseline is carried forward verbatim as a new `imported_prompt_refresh` version that re-appends the changed AI rules as the override block, because the generators cannot rebuild published external prompt text. Only a generated baseline is re-rendered from the Profile.
+
 ### 5. Export
 
 Export normalizes the request, reloads the persisted Profile, and requires both its revision and content fingerprint to match the request. After Profile validation, the four generated files are written to a ZIP. The response returns that ZIP and the server retains the ZIP plus a Profile/fingerprint snapshot under `exports/`.

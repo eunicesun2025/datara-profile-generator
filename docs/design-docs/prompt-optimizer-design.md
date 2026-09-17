@@ -586,7 +586,7 @@ Stored at `optimizer/prompt_versions/{id}.json`.
 |---|---|
 | `id`, `profile_id`, `version_number` | Identity and display sequence. Unique `(profile_id, version_number)`. |
 | `parent_version_id` | Version from which this content was derived. |
-| `origin` | `manual_edit`, `baseline`, `optimizer_candidate`, `promotion`, or `rollback`. |
+| `origin` | `manual_edit`, `baseline`, `imported_prompt`, `imported_prompt_refresh`, `optimizer_candidate`, `promotion`, or `rollback`. |
 | `lifecycle` | `candidate`, `validated`, `active`, or `superseded`. |
 | `profile_revision`, `profile_fingerprint` | Source Profile snapshot. |
 | `global_rules_version`, `global_rules_hash` | Code-rule identity. |
@@ -987,7 +987,9 @@ Retries are persisted with attempt count but do not create extra optimization it
 Existing users can edit `FieldDef.extraction` and Profile rules outside Prompt Optimizer. After every successful Profile save, and lazily when version history is opened, compute the rendered prompt hash:
 
 - if it equals the active PromptState hash, do nothing;
-- if it differs, create a new immutable `manual_edit` version from the saved Profile and make it active;
+- if the active version is generated, create a new immutable `manual_edit` version from the saved Profile and make it active;
+- if the active version is imported, compare only the prompt-relevant Profile projection (`prompt_fingerprint`: table names, field order, prompt headings, field attributes, and AI extraction rules). While that projection is unchanged the imported version stays active, so attaching samples, selecting reference files, or renaming the database never invalidates a published prompt the generators cannot rebuild. When it did change, create an `imported_prompt_refresh` version that keeps `imported_prompt_base` byte-for-byte and re-appends the changed AI rules to the marked override block;
+- an imported baseline is never replaced by a generated prompt;
 - do not create a version for Profile edits that leave the rendered prompt unchanged.
 
 This keeps the existing editor authoritative and prevents hidden version drift.

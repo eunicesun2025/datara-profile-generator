@@ -11,7 +11,7 @@ from PIL import Image
 from datara.app import create_app
 from datara.domain import FieldDef, TableDef, new_profile, normalize, validate_profile
 from datara.evaluation import compare_values, evaluate_output
-from datara.generators import profile_with_field_rules, prompt_components
+from datara.generators import profile_with_field_rules, prompt_components, prompt_fingerprint
 from datara.optimizer import (IMPORTED_OVERRIDE_MARKER, RESPONSE_PARSER_VERSION,
                               PromptOptimizerService, candidate_uses_language, create_run_record,
                               ensure_prompt_version, import_prompt_version,
@@ -954,6 +954,104 @@ def test_imported_prompt_is_active_baseline_and_candidate_only_appends_selected_
         untouched = next(f for f in candidate["profile_snapshot"]["tables"][0]["fields"]
                          if f["id"] == invoice_number.id)
         assert untouched["extraction"] == "keep invoice rule"
+
+
+def test_prompt_fingerprint_ignores_workspace_state_but_tracks_prompt_content():
+    profile = new_profile("Fingerprint profile")
+    field = FieldDef(name="company_name", extraction="rule one")
+    profile.tables[0].fields[:0] = [field]
+    normalize(profile)
+    baseline = prompt_fingerprint(profile)
+    attached = profile.model_copy(deep=True)
+    attached.sample_ids = ["sample-1"]
+    attached.reference_ids = ["reference-1"]
+    attached.database_name = "OtherDb"
+    assert prompt_fingerprint(attached) == baseline
+    edited = profile.model_copy(deep=True)
+    edited.tables[0].fields[0].extraction = "rule two"
+    assert prompt_fingerprint(edited) != baseline
+
+
+def test_attaching_a_sample_keeps_the_imported_prompt_baseline(tmp_path):
+    with TestClient(create_app(tmp_path)) as client:
+        profile = new_profile("Published invoice profile")
+        company = FieldDef(name="company_name", extraction="old company rule")
+        profile.tables[0].fields[:0] = [company]
+        profile = client.post("/api/profiles/save", json=profile.model_dump()).json()
+        imported_text = "现有生产发票提示词，含未映射字段的全局规则。\ncompany_name:\n识别买方公司名称。"
+        imported = client.post(f"/api/profiles/{profile['id']}/prompt-versions/import", json={
+            "expected_profile_revision": profile["revision"], "prompt_text": imported_text,
+        }).json()
+        after_import = client.get(f"/api/profiles/{profile['id']}/prompt-versions").json()
+        assert after_import["active_prompt_version_id"] == imported["id"]
+
+        workspace = imported["profile"]
+        workspace["sample_ids"] = ["sample-1"]
+        workspace["reference_ids"] = ["reference-1"]
+        saved = client.post("/api/profiles/save", json=workspace).json()
+        assert saved["sample_ids"] == ["sample-1"]
+
+        versions = client.get(f"/api/profiles/{profile['id']}/prompt-versions").json()
+        assert versions["active_prompt_version_id"] == imported["id"]
+        assert len(versions["versions"]) == len(after_import["versions"])
+        active = client.get(f"/api/prompt-versions/{imported['id']}").json()
+        assert active["prompt_source"] == "imported"
+        assert active["rendered_prompt"].strip() == imported_text
+
+
+def test_field_rule_edit_after_import_preserves_the_imported_base(tmp_path):
+    with TestClient(create_app(tmp_path)) as client:
+        profile = new_profile("Published invoice profile")
+        company = FieldDef(name="company_name", extraction="old company rule")
+        invoice_number = FieldDef(name="invoice_number", extraction="keep invoice rule")
+        profile.tables[0].fields[:0] = [company, invoice_number]
+        profile = client.post("/api/profiles/save", json=profile.model_dump()).json()
+        imported_text = "现有生产发票提示词，含未映射字段的全局规则。\ncompany_name:\n识别买方公司名称。"
+        imported = client.post(f"/api/profiles/{profile['id']}/prompt-versions/import", json={
+            "expected_profile_revision": profile["revision"], "prompt_text": imported_text,
+        }).json()
+
+        edited = imported["profile"]
+        new_rule = "改为只从 Consignee 区域提取买方公司名称。"
+        for field in edited["tables"][0]["fields"]:
+            if field["id"] == company.id:
+                field["extraction"] = new_rule
+        client.post("/api/profiles/save", json=edited)
+
+        versions = client.get(f"/api/profiles/{profile['id']}/prompt-versions").json()
+        refreshed_id = versions["active_prompt_version_id"]
+        assert refreshed_id != imported["id"]
+        refreshed = client.get(f"/api/prompt-versions/{refreshed_id}").json()
+        assert refreshed["origin"] == "imported_prompt_refresh"
+        assert refreshed["prompt_source"] == "imported"
+        assert refreshed["parent_version_id"] == imported["id"]
+        assert refreshed["imported_prompt_base"].strip() == imported_text
+        assert refreshed["rendered_prompt"].startswith(imported_text)
+        assert IMPORTED_OVERRIDE_MARKER in refreshed["rendered_prompt"]
+        assert new_rule in refreshed["rendered_prompt"]
+        assert refreshed["field_rule_overrides"] == {company.id: new_rule}
+
+        again = client.get(f"/api/profiles/{profile['id']}/prompt-versions").json()
+        assert again["active_prompt_version_id"] == refreshed_id
+        assert len(again["versions"]) == len(versions["versions"])
+
+        service = client.app.state.optimizer_service
+        response = CandidateResponse.model_validate({
+            "analyses": [],
+            "candidate_rules": [{
+                "field_id": invoice_number.id,
+                "old_rule_hash": hashlib.sha256("keep invoice rule".encode("utf-8")).hexdigest(),
+                "new_rule": "Read the invoice number from the top-right stamp.",
+                "reason": "The number was missed.",
+            }],
+        })
+        candidate, _ = service._build_candidate_version({
+            "id": "refresh-test-run", "selected_fields": [{"field_id": invoice_number.id}],
+        }, refreshed, response, "{}", "refresh-test-iteration")
+        assert candidate["prompt_source"] == "imported"
+        assert candidate["rendered_prompt"].startswith(imported_text)
+        assert candidate["field_rule_overrides"][company.id] == new_rule
+        assert "Read the invoice number from the top-right stamp." in candidate["rendered_prompt"]
 
 
 def test_invoice_company_optimizer_runs_with_imported_prompt_and_no_regression_set(tmp_path, monkeypatch):

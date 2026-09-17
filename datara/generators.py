@@ -158,6 +158,18 @@ def fingerprint(p: Profile) -> str:
     return hashlib.sha256(json.dumps(content, ensure_ascii=False, sort_keys=True).encode()).hexdigest()
 
 
+def prompt_fingerprint(p: Profile) -> str:
+    """Hash only the Profile projection that can change the rendered extraction prompt.
+
+    ``fingerprint`` covers the whole Profile, so workspace-only state (attached
+    ``sample_ids`` / ``reference_ids``, SQL naming, sample values) changes it while the
+    prompt text stays byte-identical. Validity checks that decide whether an existing
+    prompt version still describes the Profile — notably the imported baseline, whose text
+    the generators cannot rebuild — must use this narrower projection instead.
+    """
+    return text_hash(json.dumps(prompt_components(p), ensure_ascii=False, sort_keys=True))
+
+
 def preview(p: Profile) -> dict:
     issues = validate_profile(p)
     if issues["errors"]:

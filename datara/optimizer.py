@@ -9,10 +9,12 @@ import time
 from datetime import datetime, timezone
 from typing import Callable
 
+from pydantic import ValidationError
+
 from .domain import Profile, model_json, normalize, uid, validate_profile, validate_result
 from .evaluation import default_policy, evaluate_output, summarize_metrics
 from .generators import (fingerprint, profile_with_field_rules, prompt, prompt_components,
-                         text_hash)
+                         prompt_fingerprint, text_hash)
 from .optimizer_models import (CandidateResponse, ComparisonPolicy, OptimizationRunCreate,
                                TestCaseCreate)
 from .provider import Connection, classify_transient, completion
@@ -132,24 +134,43 @@ def create_prompt_version(store: Store, profile: Profile, *, origin: str,
 
 
 def ensure_prompt_version(store: Store, profile: Profile, origin: str = "manual_edit") -> dict:
+    """Return the active prompt version, creating one only when prompt content changed.
+
+    An imported baseline is the user's published prompt text; the generators cannot rebuild
+    it from the Profile. It therefore stays active while the prompt-relevant Profile
+    projection is unchanged (attaching a sample must not invalidate it), and it is carried
+    forward with refreshed field overrides when that projection does change. It is never
+    silently replaced by a generated prompt.
+    """
     rendered_hash = text_hash(prompt(profile))
     with store.lock:
         state_path = store.path("optimizer/prompt_states", profile.id)
-        if state_path.exists():
-            state = json.loads(state_path.read_text(encoding="utf-8"))
-            active_id = state.get("active_prompt_version_id")
-            if active_id and state.get("active_prompt_hash") == rendered_hash:
-                return store.read_json("optimizer/prompt_versions", active_id)
-            if active_id:
-                active = store.read_json("optimizer/prompt_versions", active_id)
-                if (active.get("prompt_source") == "imported" and
-                        active.get("profile_fingerprint") == fingerprint(profile)):
+        state = json.loads(state_path.read_text(encoding="utf-8")) if state_path.exists() else None
+        active_id = state.get("active_prompt_version_id") if state else None
+        if active_id and state.get("active_prompt_hash") == rendered_hash:
+            return store.read_json("optimizer/prompt_versions", active_id)
+        if active_id:
+            active = store.read_json("optimizer/prompt_versions", active_id)
+            if active.get("prompt_source") == "imported":
+                if _imported_baseline_is_current(active, profile):
                     return active
-        else:
-            state = None
-        return create_prompt_version(store, profile, origin=origin,
-                                     parent_version_id=state.get("active_prompt_version_id") if state else None,
+                carried = carry_imported_baseline(store, profile, active)
+                if carried:
+                    return carried
+        return create_prompt_version(store, profile, origin=origin, parent_version_id=active_id,
                                      make_active=True)
+
+
+def _imported_baseline_is_current(active: dict, profile: Profile) -> bool:
+    """Compare the imported version's Profile snapshot using prompt-relevant content only."""
+    snapshot = active.get("profile_snapshot")
+    if not snapshot:
+        return False
+    try:
+        previous = Profile.model_validate(snapshot)
+    except ValidationError:  # Older snapshot shape: treat as changed and carry the text forward.
+        return False
+    return prompt_fingerprint(previous) == prompt_fingerprint(profile)
 
 
 def imported_prompt_field_rules(profile: Profile, prompt_text: str) -> dict[str, str]:
@@ -293,6 +314,36 @@ def render_imported_prompt(base: str, profile: Profile, overrides: dict[str, str
         table_name, field_name, _ = by_id[field_id]
         sections.extend([f"\n{table_name}.{field_name}", overrides[field_id].strip()])
     return "\n".join(sections).rstrip() + "\n"
+
+
+def carry_imported_baseline(store: Store, profile: Profile, active: dict) -> dict | None:
+    """Keep the imported prompt text active after prompt-relevant Profile edits.
+
+    The published text is kept verbatim because the generators cannot rebuild it. AI field
+    rules that differ from the rules the imported version was synchronized with (including
+    newly added fields) are re-appended as the higher-priority override block, and overrides
+    accumulated by earlier optimizer candidates are preserved. Returns ``None`` when no
+    imported text survives in the record, letting the caller fall back to a generated prompt.
+    """
+    base = (active.get("imported_prompt_base") or "").strip()
+    if not base:
+        base = (active.get("rendered_prompt") or "").split(IMPORTED_OVERRIDE_MARKER)[0].strip()
+    if not base:
+        return None
+    previous_rules = {item["field_id"]: item["extraction_rule"] for item in active.get("field_rules") or []}
+    current_rules = {item["field_id"]: item["extraction_rule"]
+                     for item in prompt_components(profile)["field_rules"]}
+    overrides = {field_id: rule for field_id, rule in (active.get("field_rule_overrides") or {}).items()
+                 if field_id in current_rules and rule.strip()}
+    for field_id, rule in current_rules.items():
+        if rule.strip() and previous_rules.get(field_id, "").strip() != rule.strip():
+            overrides[field_id] = rule
+    rendered = render_imported_prompt(base, profile, overrides) if overrides else base + "\n"
+    return create_prompt_version(
+        store, profile, origin="imported_prompt_refresh", parent_version_id=active["id"],
+        lifecycle="active", make_active=True, rendered_prompt_override=rendered,
+        prompt_source="imported", imported_prompt_base=base, field_rule_overrides=overrides,
+    )
 
 
 def list_prompt_versions(store: Store, profile_id: str) -> list[dict]:
