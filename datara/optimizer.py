@@ -6,6 +6,7 @@ import json
 import logging
 import re
 import time
+from contextvars import ContextVar
 from datetime import datetime, timezone
 from typing import Callable
 
@@ -17,7 +18,7 @@ from .generators import (fingerprint, profile_with_field_rules, prompt, prompt_c
                          prompt_fingerprint, text_hash)
 from .optimizer_models import (CandidateResponse, ComparisonPolicy, OptimizationRunCreate,
                                TestCaseCreate)
-from .provider import Connection, classify_transient, completion
+from .provider import Connection, completion, completion_with_attempts
 from .storage import Conflict, Store
 
 
@@ -581,7 +582,9 @@ def decide_candidate(baseline: dict, best: dict, candidate: dict, settings: dict
     reasons = []
     failure_gain = _metric_ratio(candidate, "failure_selected") - _metric_ratio(best, "failure_selected")
     regression_floor = _metric_ratio(baseline, "regression_all") - settings["max_regression_drop"]
-    if failure_gain + 1e-12 < settings["minimum_improvement"]:
+    if failure_gain <= 1e-12:
+        reasons.append("本次实测未证明候选优于原版；历史错误仅用于分析，不计入准确率")
+    elif failure_gain + 1e-12 < settings["minimum_improvement"]:
         reasons.append(f"Failure Set 提升 {failure_gain:.4f}，低于阈值 {settings['minimum_improvement']:.4f}")
     if _metric_ratio(candidate, "regression_all") + 1e-12 < regression_floor:
         reasons.append("Regression Set 总体准确率低于基线保护线")
@@ -605,11 +608,27 @@ def _field_score(rows: list[dict], field_id: str) -> dict:
     return {"matched": count, "total": len(matches), "ratio": count / len(matches) if matches else None}
 
 
+def repeated_path_summary(rows: list[dict]) -> list[dict]:
+    """A path is fixed only if every measured repetition passed, not just the last."""
+    groups = {}
+    for row in rows:
+        groups.setdefault((row["test_case_id"], row["path"]), []).append(row)
+    result = []
+    for group in groups.values():
+        failed = [r for r in group if not r["matched"] or r.get("indeterminate")]
+        item = dict(failed[0] if failed else group[0])
+        item.update(matched=not failed, passed_repetitions=len(group) - len(failed),
+                    total_repetitions=len(group))
+        result.append(item)
+    return result
+
+
 class PromptOptimizerService:
     def __init__(self, store: Store, connection: Callable[[], Connection], api_key: Callable[[], str]):
         self.store = store
         self.connection = connection
         self.api_key = api_key
+        self._run_key = ContextVar("optimizer_api_key", default=None)
 
     def _save_run(self, run: dict):
         _write(self.store, "optimizer/runs", run["id"], run)
@@ -684,40 +703,11 @@ class PromptOptimizerService:
 
     async def _complete(self, connection: Connection, instructions: str, images: list,
                         reference_text: str = "") -> tuple[str, int]:
-        # Bound the whole logical request, including rate-limit retries/backoff.
-        try:
-            async with asyncio.timeout(connection.timeout):
-                return await self._complete_attempts(connection, instructions, images, reference_text)
-        except TimeoutError as exc:
-            raise ValueError(f"模型请求超时：总等待超过 {connection.timeout} 秒（含重试）") from exc
-
-    async def _complete_attempts(self, connection: Connection, instructions: str, images: list,
-                                 reference_text: str = "") -> tuple[str, int]:
-        attempts = 0
-        while True:
-            attempts += 1
-            try:
-                if reference_text:
-                    result = await completion(connection, self.api_key(), instructions, images,
-                                              reference_text=reference_text)
-                else:
-                    result = await completion(connection, self.api_key(), instructions, images)
-                return result, attempts
-            except ValueError as exc:
-                message = str(exc)
-                # Shared with the interactive extract/draft jobs so every model caller
-                # treats a flaky corporate proxy the same way. A model timeout may
-                # already have consumed 10–30 minutes; retrying the identical large
-                # vision request here made one failed sample look like a task that was
-                # stuck for twice the configured timeout.
-                transient, limit = classify_transient(message)
-                if not transient or attempts >= limit:
-                    raise
-                logger.warning(
-                    "optimizer_model_retry model=%s attempt=%d max_attempts=%d reason=%s",
-                    connection.model, attempts, limit, message,
-                )
-                await asyncio.sleep(min(2 ** (attempts - 1), 4))
+        return await completion_with_attempts(
+            connection, self._run_key.get() if self._run_key.get() is not None else self.api_key(),
+            instructions, images, reference_text,
+            request=completion, retry_logger=logger, retry_event="optimizer_model_retry",
+        )
 
     async def _extract_version(self, run: dict, version: dict, phase: str,
                                iteration_id: str | None,
@@ -727,15 +717,14 @@ class PromptOptimizerService:
         instructions = version["rendered_prompt"]
         connection = (run_connection or self.connection()).model_copy(deep=True)
         connection.model = connection.extraction_model.strip() or connection.model
+        repeats = run["settings"].get("evaluation_repeats", 1)
         cache_records = (self.store.list_json("optimizer/extractions")
-                         if phase == "baseline" and run["settings"].get("reuse_baseline_results", True)
+                         if repeats == 1 and phase == "baseline" and run["settings"].get("reuse_baseline_results", True)
                          else [])
         failure_rows, regression_rows = [], []
-        observed_ids = (self._observed_failure_rows(run, version)[1]
-                        if phase == "baseline" else set())
         completed = 0
 
-        async def extract_case(index, case):
+        async def extract_case(index, case, repetition):
             nonlocal completed
             self._cancelled(run)
             started = datetime.now(timezone.utc)
@@ -746,6 +735,8 @@ class PromptOptimizerService:
                 "model_id": connection.model, "timeout_seconds": connection.timeout,
                 "request_started_at": started.isoformat(),
                 "completed_cases": completed,
+                "repetition": repetition, "evaluation_repeats": repeats,
+                "request_total": len(run["run_test_cases"]) * repeats,
             }
             self._save_run(run)
             logger.info(
@@ -761,21 +752,8 @@ class PromptOptimizerService:
             extraction_id = uid()
             cached = (self._cached_baseline(run, version, case, connection, cache_records)
                       if phase == "baseline" else None)
-            # User-confirmed output is already the baseline evidence. Repeating
-            # the same vision call adds latency and cannot erase that known failure.
             truth = self.store.read_json("optimizer/ground_truth", case["ground_truth_id"])
-            observed = case.get("observed_output")
-            observed_coverage = validate_ground_truth(profile, observed or {})["covered_paths"]
-            truth_paths = {row["path"] for row in truth["covered_paths"]}
-            reuse_observed = (case["test_case_id"] in observed_ids and
-                              truth_paths.issubset({row["path"] for row in observed_coverage}))
-            if reuse_observed:
-                parsed = observed
-                raw = json.dumps(parsed, ensure_ascii=False)
-                validation, attempt_count = validate_result(profile, parsed), 0
-                cached = None
-                run["observed_baseline_reuses"] = run.get("observed_baseline_reuses", 0) + 1
-            elif cached:
+            if cached:
                 raw, parsed = cached["raw_response"], cached["parsed_output"]
                 validation, attempt_count = validate_result(profile, parsed), 0
                 run["cache_hits"] = run.get("cache_hits", 0) + 1
@@ -814,8 +792,8 @@ class PromptOptimizerService:
                 evaluation["test_case_id"] = case["test_case_id"]
                 evaluation["test_case_name"] = case["name"]
                 evaluation["dataset_role"] = case["dataset_role"]
-                if reuse_observed:
-                    evaluation["evidence_source"] = "observed_failure"
+                evaluation["repetition"] = repetition
+                evaluation["evidence_source"] = "model"
             elapsed = int((datetime.now(timezone.utc) - started).total_seconds() * 1000)
             extraction = {
                 "schema_version": "1.0", "id": extraction_id, "run_id": run["id"],
@@ -826,9 +804,10 @@ class PromptOptimizerService:
                 "json_structure_hash": version["json_structure_hash"],
                 "model_id": connection.model, "status": "completed", "attempt_count": attempt_count,
                 "max_tokens": connection.max_tokens, "enable_thinking": connection.enable_thinking,
+                "repetition": repetition, "evaluation_repeats": repeats,
                 "response_parser_version": RESPONSE_PARSER_VERSION,
                 "cache_hit": bool(cached), "cached_from_extraction_id": cached["id"] if cached else None,
-                "evidence_source": "observed_failure" if reuse_observed else "model",
+                "evidence_source": "model",
                 "latency_ms": elapsed, "raw_response": raw, "parsed_output": parsed,
                 "structure_validation": validation, "field_evaluations": evaluations,
                 "started_at": started.isoformat(), "finished_at": now(),
@@ -851,8 +830,9 @@ class PromptOptimizerService:
         semaphore = asyncio.Semaphore(run["settings"].get("extraction_concurrency", 2))
 
         async def bounded(index, case):
-            async with semaphore:
-                return await extract_case(index, case)
+            for repetition in range(1, repeats + 1):
+                async with semaphore:
+                    await extract_case(index, case, repetition)
 
         tasks = [asyncio.create_task(bounded(index, case))
                  for index, case in enumerate(run["run_test_cases"], 1)]
@@ -865,9 +845,21 @@ class PromptOptimizerService:
             await asyncio.gather(*tasks, return_exceptions=True)
             raise
         order = {case["test_case_id"]: index for index, case in enumerate(run["run_test_cases"])}
-        failure_rows.sort(key=lambda row: order[row["test_case_id"]])
-        regression_rows.sort(key=lambda row: order[row["test_case_id"]])
-        return summarize_metrics(failure_rows, regression_rows), failure_rows, regression_rows
+        failure_rows.sort(key=lambda row: (order[row["test_case_id"]], row["repetition"]))
+        regression_rows.sort(key=lambda row: (order[row["test_case_id"]], row["repetition"]))
+        metrics = summarize_metrics(failure_rows, regression_rows)
+        metrics["evaluation_repeats"] = repeats
+        metrics["case_results"] = []
+        for case in run["run_test_cases"]:
+            rows = [row for row in failure_rows + regression_rows
+                    if row["test_case_id"] == case["test_case_id"] and
+                    (case["dataset_role"] == "regression" or row["selected"])]
+            passed = sum(bool(trial) and all(r["matched"] and not r.get("indeterminate") for r in trial)
+                         for repetition in range(1, repeats + 1)
+                         for trial in [[r for r in rows if r["repetition"] == repetition]])
+            metrics["case_results"].append({"test_case_id": case["test_case_id"], "name": case["name"],
+                                             "passed": passed, "total": repeats})
+        return metrics, failure_rows, regression_rows
 
     def _analysis_images(self, run: dict, evaluations: list[dict]) -> tuple[list, list[dict]]:
         selected = {field["field_id"] for field in run["selected_fields"]}
@@ -922,6 +914,7 @@ class PromptOptimizerService:
             "完整原提示词会作为 USER REFERENCE DATA 一并提供。必须结合原提示词、字段 description、mismatch 和失败单据图片分析；extraction_rule 为空不代表原提示词没有相关规则。",
             "先判断字段的业务角色和页面区域，不得仅凭 company_name 等通用字段名把购买方误判为开票方。图片顺序见 diagnostic_images。",
             "根据 mismatch 判断根因，给出简洁、可泛化、不得包含样本答案的字段规则。old_rule_hash 必须原样复制。",
+            "evidence_source=observed_failure 是用户提供的历史错误，只用于分析，不代表本次重跑失败或错误频率。不得把它与实测结果混为一谈。",
             "new_rule、root_cause、suggested_change 和 reason 必须沿用 original_prompt_language；中文原提示词必须输出中文规则，英文原提示词必须输出英文规则。标签原文和字段名可以保留其原始语言。",
             "输出结构：" + json.dumps(schema, ensure_ascii=False),
             "输入数据：" + json.dumps(payload, ensure_ascii=False),
@@ -1069,26 +1062,22 @@ class PromptOptimizerService:
             run["connection_snapshot"]["optimizer_model"],
             run["connection_snapshot"]["extraction_model"], run_connection.timeout,
         )
+        # Each concurrent run keeps its own credential snapshot, never persisted.
+        key = self.api_key()
+        key_token = self._run_key.set(key)
         try:
             baseline = self._version(run["baseline_version_id"])
             baseline_metrics, baseline_failure, baseline_regression = await self._extract_version(
                 run, baseline, "baseline", None, run_connection)
             observed_failure, observed_case_ids = self._observed_failure_rows(run, baseline)
-            if observed_case_ids:
-                # A recorded production failure is stronger evidence than a single lucky rerun.
-                # Replace the current rows for those cases only for baseline scoring/analysis;
-                # every candidate is still evaluated with a fresh real model extraction.
-                baseline_failure = [row for row in baseline_failure
-                                    if row["test_case_id"] not in observed_case_ids]
-                baseline_failure.extend(observed_failure)
-                baseline_metrics = summarize_metrics(baseline_failure, baseline_regression)
-                run["observed_failure_case_ids"] = sorted(observed_case_ids)
+            run["observed_failure_case_ids"] = sorted(observed_case_ids)
+            run["evidence_policy"] = "historical_for_analysis_only"
             run["baseline_metrics"] = baseline_metrics
             run["best_metrics"] = baseline_metrics
-            if (run["settings"]["early_stop_enabled"] and
+            if (not observed_case_ids and run["settings"]["early_stop_enabled"] and
                     _metric_ratio(baseline_metrics, "failure_selected") >= run["settings"]["target_accuracy"]):
                 run.update(status="completed", stop_reason="target_accuracy", promotion_eligible=False,
-                           blocking_reasons=["Baseline 已达到目标准确率，无需生成候选版本"], finished_at=now())
+                           blocking_reasons=["本次基线测试达到目标，未提供相关历史错误，暂不改写提示词。可补充已知错误输出后再试；本次通过不代表长期稳定。"], finished_at=now())
                 self._save_run(run)
                 logger.info(
                     "optimizer_run_completed run_id=%s stop_reason=target_accuracy "
@@ -1118,7 +1107,7 @@ class PromptOptimizerService:
                     run_id, number, run["settings"]["max_iterations"], iteration_id,
                 )
                 response, raw = await self._candidate(
-                    run, best, best_evaluations, attempts, run_connection)
+                    run, best, best_evaluations + observed_failure, attempts, run_connection)
                 iteration["analyses"] = [a.model_dump() for a in response.analyses]
                 candidate, diffs = self._build_candidate_version(run, best, response, raw, iteration_id)
                 if not candidate:
@@ -1136,9 +1125,7 @@ class PromptOptimizerService:
                 _write(self.store, "optimizer/iterations", iteration_id, iteration)
                 metrics, failure_rows, regression_rows = await self._extract_version(
                     run, candidate, "candidate", iteration_id, run_connection)
-                # Keep the same evidence used to select the candidate. For an intermittent
-                # production failure this may be the user-confirmed observed output rather
-                # than a lucky live baseline rerun.
+                # Compare measured outcomes only; historical failures guide analysis separately.
                 previous_failure = [row for row in best_evaluations
                                     if row.get("dataset_role") == "failure"]
                 previous_regression = [row for row in best_evaluations
@@ -1180,7 +1167,7 @@ class PromptOptimizerService:
             run["stop_reason"] = stop_reason
             if best["id"] == baseline["id"]:
                 run.update(status="completed", promotion_eligible=False,
-                           blocking_reasons=["没有候选版本同时通过提升阈值和回归保护线"], finished_at=now())
+                           blocking_reasons=["未证明候选比原版更好；候选已保留供查看，不能发布。可增加重复次数或补充代表性案例。"], finished_at=now())
                 self._save_run(run)
                 logger.info(
                     "optimizer_run_completed run_id=%s stop_reason=%s best_iteration=none "
@@ -1199,6 +1186,10 @@ class PromptOptimizerService:
             stale = current.revision != run["base_profile_revision"] or fingerprint(current) != run["base_profile_fingerprint"]
             if stale:
                 final_reasons.append("Profile 在优化期间已发生变化")
+            baseline_failure = repeated_path_summary(baseline_failure)
+            baseline_regression = repeated_path_summary(baseline_regression)
+            final_failure = repeated_path_summary(final_failure)
+            final_regression = repeated_path_summary(final_regression)
             baseline_by_key = {(row["test_case_id"], row["path"]): row
                                for row in baseline_failure + baseline_regression}
             fixed = [row for row in final_failure if row["selected"] and row["matched"] and
@@ -1233,7 +1224,6 @@ class PromptOptimizerService:
             self._save_run(run)
             logger.info("optimizer_run_cancelled run_id=%s", run_id)
         except Exception as exc:
-            key = self.api_key()
             safe = str(exc).replace(key, "[redacted]") if key else str(exc)
             if run.get("iteration_ids"):
                 iteration = self.store.read_json(
@@ -1250,6 +1240,8 @@ class PromptOptimizerService:
                 run_id, run.get("progress", {}).get("phase"),
                 run.get("progress", {}).get("iteration"), safe[:1000],
             )
+        finally:
+            self._run_key.reset(key_token)
 
 
 def promote_version(store: Store, version_id: str, expected_revision: int,
@@ -1290,6 +1282,8 @@ def rollback_version(store: Store, version_id: str, expected_revision: int,
                      expected_active_version_id: str) -> tuple[Profile, dict]:
     with store.lock:
         target = store.read_json("optimizer/prompt_versions", version_id)
+        if target["lifecycle"] not in {"active", "superseded"}:
+            raise ValueError("只能回滚曾经启用的版本；未发布候选不能绕过验证直接启用")
         profile = store.load(target["profile_id"])
         state = store.read_json("optimizer/prompt_states", profile.id)
         if profile.revision != expected_revision or state["active_prompt_version_id"] != expected_active_version_id:

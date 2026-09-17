@@ -90,7 +90,7 @@ def prompt(p: Profile) -> str:
                  "只输出可解析 JSON，不要 Markdown、解释或未定义的键。表名、字段名及大小写必须与结构一致。",
                  "符合单据类型时，保留结构中的每个表和每个字段键；无法识别的值返回 null，包括必填值。",
                  "没有识别到某张子表的真实明细记录时，该表返回 []，不能用全 null 的占位对象代替。",
-                 "不凭空补 0、false、空字符串、默认货币、当前日期、行号或示例值。",
+                 "不凭空补 0、false、空字符串、默认货币、当前日期或示例值。只有已定义为 Source=AI 且规则明确要求生成的行号，才按该字段规则输出；其他行号不得自行添加。",
                  "日期为有效的 YYYYMMDD 字符串；数字输出 JSON 数值，布尔值使用 true/false。",
                  "String 和 Choice 必须是字符串。账号及业务编号保留前导零。"]
     return "\n".join(sections) + "\n"
@@ -170,12 +170,13 @@ def prompt_fingerprint(p: Profile) -> str:
     return text_hash(json.dumps(prompt_components(p), ensure_ascii=False, sort_keys=True))
 
 
-def preview(p: Profile) -> dict:
+def preview(p: Profile, *, rendered_prompt: str | None = None) -> dict:
     issues = validate_profile(p)
     if issues["errors"]:
         return {**issues, "fingerprint": fingerprint(p)}
     return {**issues, "fingerprint": fingerprint(p), "columns": COLUMNS, "rows": mapping_rows(p),
-            "sql": sql(p), "prompt": prompt(p), "structure": json_structure(p)}
+            "sql": sql(p), "prompt": rendered_prompt if rendered_prompt is not None else prompt(p),
+            "structure": json_structure(p)}
 
 
 def xlsx(p: Profile) -> bytes:
@@ -204,13 +205,13 @@ def xlsx(p: Profile) -> bytes:
     return out.getvalue()
 
 
-def export_zip(p: Profile) -> bytes:
+def export_zip(p: Profile, *, rendered_prompt: str | None = None) -> bytes:
     issues = validate_profile(p)
     if issues["errors"]:
         raise ValueError("；".join(issues["errors"]))
     output = io.BytesIO()
     entries = {"field_mapping.xlsx": xlsx(p), "create_tables.sql": sql(p).encode("utf-8"),
-               "extraction_prompt.txt": prompt(p).encode("utf-8"),
+               "extraction_prompt.txt": (rendered_prompt if rendered_prompt is not None else prompt(p)).encode("utf-8"),
                "output_structure.json": json.dumps(json_structure(p), ensure_ascii=False, indent=2).encode("utf-8")}
     with zipfile.ZipFile(output, "w", zipfile.ZIP_DEFLATED) as archive:
         for name, content in entries.items():

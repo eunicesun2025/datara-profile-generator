@@ -368,7 +368,7 @@ By contrast, Field Mapping and SQL contain every Profile field and table. This i
 - Invalid field snake case; duplicate field name or duplicate field ID within a table.
 - Reserved system field has wrong source, business type, or effective SQL type.
 - `head_id` appears on a head.
-- `company_code`, `current_date`, or `AI_Invoice_Detail.item` is not System.
+- `company_code` or `current_date` is not System. Invoice `item` follows its configured Source and is AI/String in the invoice demo, per the user's confirmed requirement.
 - Invalid SQL type syntax/bounds.
 - Choice has no values, commas inside a value, or exact duplicates.
 - Duplicate non-null `head_display` within a table.
@@ -411,7 +411,7 @@ The logical rows/text/structure are deterministic functions of the Profile. Oute
 - AI document/field inference remains prompt-driven; code normalizes structure, types, sources, and display positions but does not verify visual evidence.
 - Header/detail classification is imported or user-created, not inferred from document layout.
 - Import fallbacks (`AI`/`String`) can broaden the extraction surface. Semantic keyword rules improve common cases but remain incomplete and language-specific; changed fields are marked unreviewed.
-- Hard-coded system conventions mix generic infrastructure fields with business-specific names (`company_code`, `current_date`, invoice `item`).
+- Hard-coded system conventions mix generic infrastructure fields with business-specific names (`company_code`, `current_date`). Invoice `item` is no longer forced to System.
 - Mapping’s `ForeignKeyField` carries a table name rather than a field name.
 - `is_required` has three different meanings across artifacts: Mapping/prompt marker, result warning, and no effect on SQL nullability.
 - Runtime JSON validation and `/api/schema` can drift because they are independently implemented.

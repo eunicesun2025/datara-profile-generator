@@ -3,6 +3,9 @@ import json
 import logging
 import os
 import time
+import hashlib
+import httpx
+import zipfile
 
 import pytest
 from fastapi.testclient import TestClient
@@ -236,6 +239,43 @@ def test_mapping_import_repairs_legacy_and_preserves_identifiers(client):
     assert client.post("/api/preview", json=p).json()["errors"] == []
 
 
+def test_invoice_item_is_ai_in_demo_outputs_and_validation(client):
+    from datara.domain import Profile, json_structure, validate_profile, validate_result
+    from datara.generators import mapping_rows, prompt
+    from datara.provider import parse_analysis
+
+    profile = Profile.model_validate(client.post("/api/demo/invoice").json())
+    detail = next(t for t in profile.tables if t.name == "AI_Invoice_Detail")
+    item = next(f for f in detail.fields if f.name == "item")
+    assert item.source == "AI" and item.data_type == "String"
+    assert not validate_profile(profile)["errors"]
+    assert any(r[0] == detail.name and r[3] == "item" and r[8] == "AI" for r in mapping_rows(profile))
+    assert item.extraction in prompt(profile)
+    value = json_structure(profile)
+    value[detail.name][0]["item"] = "1"
+    assert validate_result(profile, value)["status"] == "valid"
+    value[detail.name][0]["file_id"] = 1
+    assert any("file_id：额外字段" in e for e in validate_result(profile, value)["errors"])
+    proposal = parse_analysis(json.dumps({"fields": [{"table_name": detail.name,
+        "name": "item", "data_type": "String", "extraction": item.extraction}]}), profile)
+    assert proposal["suggestions"][0]["field"]["name"] == "item"
+
+
+@pytest.mark.parametrize("source", ["AI", "Manual", "System"])
+def test_import_preserves_invoice_item_source(source):
+    workbook = Workbook()
+    sheet = workbook.active
+    sheet.append(["TableName", "TableLevel", "ForeignKeyField", "ColumnName", "DataType", "Source"])
+    sheet.append(["AI_Invoice_Head", 1, None, "invoice_number", "String", "AI"])
+    sheet.append(["AI_Invoice_Detail", 2, "AI_Invoice_Head", "item", "String", source])
+    output = io.BytesIO()
+    workbook.save(output)
+    profile, notes = parse_fields(output.getvalue(), sheet.title)
+    item = next(f for t in profile.tables if t.name == "AI_Invoice_Detail" for f in t.fields if f.name == "item")
+    assert item.source == source
+    assert not any("item" in note and "System" in note for note in notes)
+
+
 def test_plain_excel_column_selection():
     w=Workbook();s=w.active;s.title="业务清单";s.append(["名称","说明"]);s.append(["account_no","账号"])
     out=io.BytesIO();w.save(out)
@@ -299,6 +339,139 @@ def test_extract_job_survives_a_transient_connection_failure(client, monkeypatch
         time.sleep(.05)
     assert calls["n"] == 2
     assert result["status"] == "completed"
+
+
+@pytest.mark.parametrize("thinking", [True, False, None])
+def test_model_routes_share_transport_retries_and_thinking(client, monkeypatch, thinking):
+    """Exercise the real provider through jobs, optimizer phases and connection diagnostics."""
+    profile = new_profile("Transport regression")
+    field = FieldDef(name="amount", data_type="Decimal")
+    profile.tables[0].fields.append(field)
+    profile = client.post("/api/profiles/save", json=profile.model_dump()).json()
+    sample = client.post("/api/samples", files={"file": ("sample.png", image_bytes())}).json()
+    seen, failures = [], set()
+    real_client = httpx.AsyncClient
+
+    def handler(request):
+        payload = json.loads(request.content)
+        seen.append(payload)
+        assert request.headers["authorization"] == "Bearer regression-key"
+        if thinking is None:
+            assert "enable_thinking" not in payload
+        else:
+            assert payload["enable_thinking"] is thinking
+        assert payload["stream"] is (thinking is True)
+        instructions = payload["messages"][0]["content"]
+        identity = (payload["model"], instructions)
+        if identity not in failures:
+            failures.add(identity)
+            raise httpx.ConnectTimeout("proxy handshake")
+        if "Datara 字段级提取提示词优化器" in instructions:
+            assert payload["model"] == "analysis-model"
+            # Editing settings during analysis must not change later evaluation calls.
+            client.app.state.api_key = "replacement-key"
+            client.app.state.connection.enable_thinking = not thinking
+            answer = {"analyses": [], "candidate_rules": [{
+                "field_id": field.id, "old_rule_hash": hashlib.sha256(b"").hexdigest(),
+                "new_rule": "提取总金额，排除小计金额。", "reason": "区分总计与小计。",
+            }]}
+        elif "Datara 单据分析与提取配置专家" in instructions:
+            assert payload["model"] == "analysis-model"
+            answer = {"fields": []}
+        elif "仅回复 JSON" in instructions:
+            answer = {"ok": True}
+        else:
+            assert payload["model"] == "extract-model"
+            answer = {"AI_Document": {"amount": 100 if "排除小计金额" in instructions else 90}}
+        raw = json.dumps(answer, ensure_ascii=False)
+        if thinking:
+            chunk = {"choices": [{"delta": {"content": raw}, "finish_reason": "stop"}]}
+            return httpx.Response(200, text="data: " + json.dumps(chunk) + "\n\ndata: [DONE]\n\n",
+                                  headers={"content-type": "text/event-stream"})
+        return httpx.Response(200, json={"choices": [{"message": {"content": raw}}]})
+
+    monkeypatch.setattr("datara.provider.httpx.AsyncClient", lambda **kw: real_client(
+        transport=httpx.MockTransport(handler), **kw))
+    settings = {"base_url": "https://example.test/v1", "model": "default-model",
+                "optimizer_model": "analysis-model", "extraction_model": "extract-model",
+                "enable_thinking": thinking, "api_key": "regression-key"}
+    assert client.post("/api/settings", json=settings).json()["enable_thinking"] is thinking
+    assert client.get("/api/settings").json()["enable_thinking"] is thinking
+    stored = client.app.state.store.root / "connection.json"
+    assert json.loads(stored.read_text())["enable_thinking"] is thinking
+    assert "regression-key" not in stored.read_text()
+
+    for kind in ("extract", "draft"):
+        job = client.post("/api/jobs", json={"profile": profile, "sample_id": sample["id"], "kind": kind}).json()
+        for _ in range(300):
+            result = client.get("/api/jobs/" + job["id"]).json()
+            if result["status"] != "running":
+                break
+            time.sleep(.02)
+        assert result["status"] == "completed", result
+        assert result["model"] == ("extract-model" if kind == "extract" else "analysis-model")
+        assert result["enable_thinking"] is thinking
+
+    case = client.post(f"/api/optimizer/profiles/{profile['id']}/test-cases", json={
+        "sample_id": sample["id"], "name": "total", "dataset_role": "failure",
+        "ground_truth": {"AI_Document": {"amount": 100}},
+    }).json()
+    run = client.post("/api/optimizer/runs", json={
+        "profile_id": profile["id"], "profile_revision": profile["revision"],
+        "selected_field_ids": [field.id], "failure_test_case_ids": [case["id"]],
+        "settings": {"max_iterations": 1},
+    }).json()
+    for _ in range(500):
+        result = client.get("/api/optimizer/runs/" + run["id"]).json()
+        if result["status"] not in {"queued", "baselining", "optimizing", "validating"}:
+            break
+        time.sleep(.02)
+    assert result["status"] == "completed", result
+    records = [client.app.state.store.read_json("optimizer/extractions", identity)
+               for identity in result["extraction_ids"]]
+    assert {r["phase"] for r in records} == {"baseline", "candidate", "final_validation"}
+    assert all(r["model_id"] == "extract-model" and r["enable_thinking"] is thinking for r in records)
+    client.post("/api/settings", json=settings)
+    diagnostic = client.post("/api/settings/test").json()
+    assert diagnostic["ok"] is True
+    assert {r["model"] for r in diagnostic["results"]} == {"default-model", "analysis-model", "extract-model"}
+    assert len(seen) > len(failures)  # Every distinct request survived a transport failure.
+
+
+def test_interactive_extract_uses_the_active_imported_prompt(client, monkeypatch):
+    text = 'Published prompt: preserve this exact instruction. Return JSON {"AI_Document":{"amount":null}}.'
+    profile = new_profile()
+    profile.tables[0].fields.append(FieldDef(name="amount", data_type="Decimal"))
+    profile = client.post("/api/profiles/save", json=profile.model_dump()).json()
+    imported = client.post(f"/api/profiles/{profile['id']}/prompt-versions/import", json={
+        "prompt_text": text, "expected_profile_revision": profile["revision"],
+    }).json()
+    profile = imported["profile"]
+    version = client.get("/api/prompt-versions/" + imported["id"]).json()
+    async def check(c, key, instructions, images):
+        assert instructions == version["rendered_prompt"]
+        return '{"AI_Document":{"amount":null}}'
+    monkeypatch.setattr("datara.app.completion_retrying", check)
+    client.post("/api/settings", json={"api_key": "test-key"})
+    sample = client.post("/api/samples", files={"file": ("sample.png", image_bytes())}).json()
+    job = client.post("/api/jobs", json={"profile": profile, "sample_id": sample["id"], "kind": "extract"}).json()
+    for _ in range(100):
+        result = client.get("/api/jobs/" + job["id"]).json()
+        if result["status"] != "running":
+            break
+        time.sleep(.01)
+    assert result["status"] == "completed", result
+    assert result["prompt_version_id"] == version["id"]
+    assert result["prompt_hash"] == version["prompt_hash"]
+    preview = client.post("/api/preview", json=profile).json()
+    assert preview["prompt"] == version["rendered_prompt"]
+    archive = client.post("/api/export", json=profile)
+    assert archive.status_code == 200
+    with zipfile.ZipFile(io.BytesIO(archive.content)) as exported:
+        assert exported.read("extraction_prompt.txt").decode() == preview["prompt"]
+    profile["document_rules"] = "未保存的新规则"
+    response = client.post("/api/jobs", json={"profile": profile, "sample_id": sample["id"], "kind": "extract"})
+    assert response.status_code == 409
 
 
 def test_extract_job_parses_a_fenced_model_response(client, monkeypatch):

@@ -261,3 +261,81 @@ def test_completion_retrying_gives_up_after_the_connection_budget(monkeypatch):
     assert calls["n"] == 2
 
 
+def test_interactive_deadline_includes_retry_backoff(monkeypatch):
+    async def busy(*args, **kwargs):
+        raise ValueError("模型接口返回 HTTP 429")
+    monkeypatch.setattr("datara.provider.completion", busy)
+    with pytest.raises(ValueError, match="含重试"):
+        asyncio.run(completion_retrying(Connection().model_copy(update={"timeout": 0.03}),
+                                        "key", "task", []))
+
+
+def test_cancellation_is_never_retried(monkeypatch):
+    calls = []
+    async def cancelled(*args, **kwargs):
+        calls.append(1)
+        raise asyncio.CancelledError()
+    monkeypatch.setattr("datara.provider.completion", cancelled)
+    with pytest.raises(asyncio.CancelledError):
+        asyncio.run(completion_retrying(Connection(), "key", "task", []))
+    assert len(calls) == 1
+
+
+@pytest.mark.parametrize("ending,expected_error", [
+    ('data: {"choices":[{"delta":{},"finish_reason":"stop"}]}\n\ndata: [DONE]\n\n', None),
+    ('', "流式响应中断"),
+    ('data: {"choices":[{"delta":{},"finish_reason":"length"}]}\n\n', "长度上限"),
+])
+def test_thinking_stream_reassembles_answer_without_reasoning(monkeypatch, ending, expected_error):
+    real_client = httpx.AsyncClient
+    def handler(request):
+        payload = json.loads(request.content)
+        assert payload["enable_thinking"] is True
+        assert payload["stream"] is True
+        chunks = [
+            {"choices": [{"delta": {"reasoning_content": "private reasoning"}}]},
+            {"choices": [{"delta": {"content": '{"ok":'}}]},
+            {"choices": [{"delta": {"content": 'true}'}}]},
+        ]
+        text = ": heartbeat\n\n" + "".join("data: " + json.dumps(c) + "\n\n" for c in chunks) + ending
+        return httpx.Response(200, text=text, headers={"content-type": "text/event-stream"})
+    monkeypatch.setattr("datara.provider.httpx.AsyncClient", lambda **kw: real_client(
+        transport=httpx.MockTransport(handler), **kw))
+    call = completion(Connection(enable_thinking=True), "key", "task", [])
+    if expected_error:
+        with pytest.raises(ValueError, match=expected_error):
+            asyncio.run(call)
+    else:
+        assert asyncio.run(call) == '{"ok":true}'
+
+
+@pytest.mark.parametrize("body", [None, [], {"choices": None}, {"choices": [{"message": None}]},
+                                  {"choices": [{"message": {"content": ""}}]}])
+def test_malformed_success_response_has_actionable_error(monkeypatch, body):
+    real_client = httpx.AsyncClient
+    monkeypatch.setattr("datara.provider.httpx.AsyncClient", lambda **kw: real_client(
+        transport=httpx.MockTransport(lambda r: httpx.Response(200, content=json.dumps(body))), **kw))
+    with pytest.raises(ValueError, match="模型"):
+        asyncio.run(completion(Connection(), "key", "task", []))
+
+
+def test_network_log_does_not_include_proxy_credentials(monkeypatch, caplog):
+    real_client = httpx.AsyncClient
+    def handler(request):
+        raise httpx.ConnectError("http://user:secret@proxy.test private-key")
+    monkeypatch.setattr("datara.provider.httpx.AsyncClient", lambda **kw: real_client(
+        transport=httpx.MockTransport(handler), **kw))
+    with pytest.raises(ValueError):
+        asyncio.run(completion(Connection(), "private-key", "task", []))
+    assert "secret" not in caplog.text and "private-key" not in caplog.text
+
+
+def test_reasoning_only_stream_is_not_a_success(monkeypatch):
+    real_client = httpx.AsyncClient
+    chunk = {"choices": [{"delta": {"reasoning_content": "reasoning only"}, "finish_reason": "stop"}]}
+    text = "data: " + json.dumps(chunk) + "\n\ndata: [DONE]\n\n"
+    monkeypatch.setattr("datara.provider.httpx.AsyncClient", lambda **kw: real_client(
+        transport=httpx.MockTransport(lambda r: httpx.Response(
+            200, text=text, headers={"content-type": "text/event-stream"})), **kw))
+    with pytest.raises(ValueError, match="未返回最终答案"):
+        asyncio.run(completion(Connection(enable_thinking=True), "key", "task", []))

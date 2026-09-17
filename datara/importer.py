@@ -111,7 +111,7 @@ def parse_fields(content: bytes, sheet: str, columns: dict | None = None, repair
             if inferred != dtype:
                 notes.append(f"{tname}.{name}：根据字段含义建议类型 {inferred}，请审核")
                 dtype, reviewed = inferred, False
-            if canonical_name in {"company_code", "current_date"} or (canonical_name == "item" and tname == "AI_Invoice_Detail"):
+            if canonical_name in {"company_code", "current_date"}:
                 if source != "System":
                     notes.append(f"{tname}.{name}：按确认规则改为 System，由 Datara 填充")
                 source = "System"

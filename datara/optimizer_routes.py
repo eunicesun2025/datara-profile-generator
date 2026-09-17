@@ -7,7 +7,7 @@ from fastapi import FastAPI
 
 from .optimizer import (PromptOptimizerService, create_ground_truth, create_run_record,
                         create_test_case, ensure_prompt_version, import_prompt_version, list_prompt_versions,
-                        promote_version, prompt_language, rollback_version)
+                        promote_version, prompt_language, rollback_version, validate_ground_truth)
 from .optimizer_models import (GroundTruthCreate, OptimizationRunCreate, PromotionRequest,
                                PromptImportRequest, TestCaseCreate, TestCaseUpdate)
 from .storage import Store
@@ -34,6 +34,12 @@ def register_optimizer_routes(app: FastAPI, store: Store, tasks: dict):
     def update_test_case(identity: str, body: TestCaseUpdate):
         record = store.read_json("optimizer/test_cases", identity)
         updates = body.model_dump(exclude_none=True)
+        if "observed_output" in body.model_fields_set:
+            if body.observed_output is not None:
+                validation = validate_ground_truth(store.load(record["profile_id"]), body.observed_output)
+                if validation["errors"]:
+                    raise ValueError("已知错误输出无效：" + "；".join(validation["errors"]))
+            updates["observed_output"] = body.observed_output
         record.update(updates)
         from .optimizer import now
         record["updated_at"] = now()

@@ -25,6 +25,7 @@ class OptimizationSettings(Model):
     final_validation_rerun: bool = True
     reuse_baseline_results: bool = True
     extraction_concurrency: int = Field(default=2, ge=1, le=4)
+    evaluation_repeats: int = Field(default=1, ge=1, le=10)
 
 
 class TestCaseCreate(Model):
@@ -39,6 +40,7 @@ class TestCaseUpdate(Model):
     name: str | None = Field(default=None, min_length=1, max_length=200)
     dataset_role: Literal["failure", "regression"] | None = None
     enabled: bool | None = None
+    observed_output: dict[str, Any] | None = None
 
 
 class GroundTruthCreate(Model):

@@ -129,7 +129,7 @@ flowchart TD
 3. `infer_type()` 用名称和说明的关键词推断类型。标识符优先保留为 String；日期为 Date；金额/单价/数量/税/比率为 Decimal；计数为 Integer；否则保留合法建议值或使用 String。
 4. `suggest_displays()` 仅当主表没有任何展示配置时，给前五个 AI 字段分配 1–5；子表不分配。
 5. 导入使用有限中英文类型/来源词表，并复用上述名称、类型与展示规则。
-6. `company_code`、`current_date` 和 `AI_Invoice_Detail.item` 是硬编码 System 业务约定。
+6. `company_code`、`current_date` 是硬编码 System 业务约定。`AI_Invoice_Detail.item` 不再强制 System；按当前用户要求配置为 AI/String，由模型按数组顺序生成行号。
 7. 导入专用的 `repair_system=True` 可把错误的保留 System 字段恢复为标准来源、类型和 SQL 类型。
 
 ### 模型辅助推断

@@ -230,8 +230,7 @@ def validate_profile(p: Profile) -> dict:
                     errors.append(f"{path}：保留 System 字段的来源和类型不可修改")
                 if field.name == "head_id" and table.role == "head":
                     errors.append(f"{path}：主表不能包含 head_id")
-            if (field.name in {"company_code", "current_date"} or
-                (field.name == "item" and table.name == "AI_Invoice_Detail")) and field.source != "System":
+            if field.name in {"company_code", "current_date"} and field.source != "System":
                 errors.append(f"{path}：已定义为由 Datara 填充的字段，来源必须为 System")
             if not valid_sql_type(effective_sql(field)):
                 errors.append(f"{path}：SQL 类型或长度/精度无效")

@@ -116,11 +116,12 @@ def test_analysis_respects_manual_system_and_detail_display():
     normalize(p)
     result = parse_analysis(json.dumps({"fields": [
         {"table_name": "AI_Document", "name": "note"},
+        {"table_name": "AI_Invoice_Detail", "name": "head_id"},
         {"table_name": "AI_Invoice_Detail", "name": "item"},
         {"table_name": "AI_Invoice_Detail", "name": "LineAmount", "head_display": 1},
     ]}), p)
-    assert len(result["suggestions"]) == 1
-    assert result["suggestions"][0]["field"]["head_display"] is None
+    assert {s["field"]["name"] for s in result["suggestions"]} == {"item", "line_amount"}
+    assert all(s["field"]["head_display"] is None for s in result["suggestions"])
 
 
 def test_draft_context_and_final_prompt_separate_reference_and_sample_data():

@@ -67,24 +67,69 @@ def classify_transient(message: str) -> tuple[bool, int]:
 
 async def completion_retrying(c: Connection, key: str, instructions: str,
                               images: list[Path], reference_text: str = "") -> str:
-    """Call :func:`completion`, retrying only the transient failures it classifies.
+    result, _ = await completion_with_attempts(c, key, instructions, images, reference_text)
+    return result
 
-    ``asyncio.CancelledError`` derives from ``BaseException``, not ``ValueError``, so a
-    user cancel still aborts immediately instead of being silently retried.
-    """
+
+async def completion_with_attempts(c: Connection, key: str, instructions: str,
+                                   images: list[Path], reference_text: str = "", *,
+                                   request=None, retry_logger=logger,
+                                   retry_event: str = "model_retry") -> tuple[str, int]:
+    """One retry policy and total deadline for every caller; cancellation propagates."""
+    request = request or completion
     attempts = 0
-    while True:
-        attempts += 1
-        try:
-            return await completion(c, key, instructions, images, reference_text=reference_text)
-        except ValueError as exc:
-            message = str(exc)
-            transient, limit = classify_transient(message)
-            if not transient or attempts >= limit:
-                raise
-            logger.warning("model_retry model=%s attempt=%d max_attempts=%d reason=%s",
-                           c.model, attempts, limit, message)
-            await asyncio.sleep(min(2 ** (attempts - 1), 4))
+    try:
+        async with asyncio.timeout(c.timeout):
+            while True:
+                attempts += 1
+                try:
+                    kwargs = {"reference_text": reference_text} if reference_text else {}
+                    return await request(c, key, instructions, images, **kwargs), attempts
+                except ValueError as exc:
+                    transient, limit = classify_transient(str(exc))
+                    if not transient or attempts >= limit:
+                        raise
+                    retry_logger.warning("%s model=%s attempt=%d max_attempts=%d",
+                                         retry_event, c.model, attempts, limit)
+                    await asyncio.sleep(min(2 ** (attempts - 1), 4))
+    except TimeoutError as exc:
+        raise ValueError(f"模型请求超时：总等待超过 {c.timeout} 秒（含重试）") from exc
+
+
+async def read_stream(response: httpx.Response) -> str:
+    """Consume Chat Completions SSE; never mix reasoning text into the JSON answer."""
+    parts, total, finished = [], 0, False
+    async for line in response.aiter_lines():
+        total += len(line.encode("utf-8"))
+        if total > 5 * 1024 * 1024:
+            raise ValueError("模型响应过大，请减少输出字段或样本范围")
+        if not line.startswith("data:"):
+            continue
+        data = line[5:].strip()
+        if data == "[DONE]":
+            finished = True
+            break
+        chunk = json.loads(data)
+        if chunk.get("error"):
+            raise ValueError("模型流式响应返回错误，请检查模型配置或重试")
+        for choice in chunk.get("choices", []):
+            if choice.get("index", 0) != 0:
+                continue
+            if choice.get("finish_reason") == "length":
+                raise ValueError("模型输出达到长度上限；请增加最大输出长度或减少样本范围")
+            if choice.get("finish_reason") == "stop":
+                finished = True
+            content = choice.get("delta", {}).get("content")
+            if content is not None:
+                if not isinstance(content, str):
+                    raise ValueError("模型未返回文本内容；请检查接口是否兼容 Chat Completions")
+                parts.append(content)
+    if not finished:
+        raise ValueError("无法连接模型端点：流式响应中断，可重试")
+    result = "".join(parts)
+    if not result.strip():
+        raise ValueError("模型未返回最终答案；请增加最大输出长度或关闭深度思考后重试")
+    return result
 
 
 async def completion(c: Connection, key: str, instructions: str, images: list[Path], reference_text: str = "") -> str:
@@ -121,6 +166,8 @@ async def completion(c: Connection, key: str, instructions: str, images: list[Pa
         thinking = False
     if thinking is not None:
         payload["enable_thinking"] = thinking
+    # Some Qwen models only support thinking in streaming mode.
+    payload["stream"] = thinking is True
     started = time.perf_counter()
     logger.info("model_request_started model=%s images=%d image_bytes=%d text_characters=%d timeout_seconds=%s",
                 c.model, len(images), total, len(instructions) + len(user_text), c.timeout)
@@ -130,8 +177,11 @@ async def completion(c: Connection, key: str, instructions: str, images: list[Pa
         # HTTPX read timeout applies between chunks, not to total response time.
         async with asyncio.timeout(c.timeout):
             async with httpx.AsyncClient(timeout=httpx.Timeout(c.timeout, connect=15), follow_redirects=False, trust_env=True) as client:
-                response = await client.post(c.base_url.rstrip("/") + "/chat/completions", json=payload,
-                                             headers={"Authorization": "Bearer " + key})
+                async with client.stream("POST", c.base_url.rstrip("/") + "/chat/completions", json=payload,
+                                         headers={"Authorization": "Bearer " + key}) as response:
+                    if response.is_success and "text/event-stream" in response.headers.get("content-type", ""):
+                        return await read_stream(response)
+                    await response.aread()
         if response.status_code == 401:
             raise ValueError("模型接口返回 HTTP 401：API Key 认证失败。请重新粘贴有效 Key（不含 Bearer 前缀），确认 Key 的地域及套餐与 Base URL 一致；百炼通用 Key 与 Coding / Token Plan 专属地址不可混用。")
         if response.status_code in {400, 413, 422} and reference_text:
@@ -149,7 +199,7 @@ async def completion(c: Connection, key: str, instructions: str, images: list[Pa
         if choice.get("finish_reason") == "length":
             raise ValueError("模型输出达到长度上限；请增加最大输出长度或减少样本范围")
         result = choice["message"]["content"]
-        if not isinstance(result, str):
+        if not isinstance(result, str) or not result.strip():
             raise ValueError("模型未返回文本内容；请检查接口是否兼容 Chat Completions")
         return result
     except httpx.ConnectTimeout as e:
@@ -159,8 +209,8 @@ async def completion(c: Connection, key: str, instructions: str, images: list[Pa
         # a TimeoutException subclass, so without this branch it was labelled as a
         # model response timeout: that advises the wrong setting and, through the
         # "请求超时" retry rule in the optimizer, cancels the retry budget entirely.
-        logger.warning("model_request_connect_timeout model=%s connect_timeout_seconds=15 error=%s: %s",
-                       c.model, type(e).__name__, e)
+        logger.warning("model_request_connect_timeout model=%s connect_timeout_seconds=15 error=%s",
+                       c.model, type(e).__name__)
         raise ValueError("无法连接模型端点：建立连接超过 15 秒连接超时（企业代理握手缓慢或网络抖动），可重试") from e
     except (httpx.TimeoutException, TimeoutError) as e:
         raise ValueError("模型请求超时，可调整超时设置后重试") from e
@@ -168,8 +218,8 @@ async def completion(c: Connection, key: str, instructions: str, images: list[Pa
         # Keep the transport-level type visible. The user-facing messages below are
         # deliberately generic, which made ConnectError and RemoteProtocolError
         # indistinguishable when diagnosing failures in the field.
-        logger.warning("model_request_network_error model=%s error=%s: %s",
-                       c.model, type(e).__name__, e)
+        logger.warning("model_request_network_error model=%s error=%s",
+                       c.model, type(e).__name__)
         cause = e
         seen = set()
         while cause is not None and id(cause) not in seen:
@@ -182,7 +232,7 @@ async def completion(c: Connection, key: str, instructions: str, images: list[Pa
         raise ValueError("无法连接模型端点，请检查网络和 API 地址") from e
     except (OSError, ssl.SSLError) as e:
         raise ValueError("无法加载 TLS 配置：请检查 SSL_CERT_FILE / SSL_CERT_DIR 是否存在且为有效的可信 CA 证书；修正后重启服务") from e
-    except (KeyError, IndexError, json.JSONDecodeError) as e:
+    except (KeyError, IndexError, TypeError, AttributeError, json.JSONDecodeError) as e:
         raise ValueError("模型响应格式不兼容，期望 choices[0].message.content") from e
     finally:
         logger.info("model_request_finished model=%s elapsed_seconds=%.2f",
@@ -235,7 +285,7 @@ def parse_analysis(raw: str, p: Profile) -> dict:
         if not table or not isinstance(original, str) or not original.strip():
             raise ValueError("AI 建议包含未知表或非法字段名，请重试或手动编辑")
         name = snake_name(original)
-        if name in SYSTEM or name in {"company_code", "current_date"} or (name == "item" and table.name == "AI_Invoice_Detail"):
+        if name in SYSTEM or name in {"company_code", "current_date"}:
             continue
         existing = next((f for f in table.fields if f.name == original or f.name == name), None)
         if existing and existing.source != "AI":

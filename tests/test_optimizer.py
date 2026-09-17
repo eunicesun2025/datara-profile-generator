@@ -395,7 +395,8 @@ def test_baseline_cache_ignores_records_parsed_by_older_rules(tmp_path, monkeypa
         assert second["cache_hits"] == 0
 
 
-def test_known_observed_failure_drives_candidate_when_current_baseline_is_lucky(tmp_path, monkeypatch):
+@pytest.mark.parametrize("repeats", [1, 3])
+def test_known_observed_failure_drives_candidate_when_current_baseline_is_lucky(tmp_path, monkeypatch, repeats):
     field_id = None
     analysis_calls = 0
 
@@ -449,7 +450,7 @@ def test_known_observed_failure_drives_candidate_when_current_baseline_is_lucky(
         run = client.post("/api/optimizer/runs", json={
             "profile_id": profile["id"], "profile_revision": profile["revision"],
             "selected_field_ids": [company.id], "failure_test_case_ids": [case["id"]],
-            "settings": {"max_iterations": 1},
+            "settings": {"max_iterations": 1, "evaluation_repeats": repeats},
         }).json()
         for _ in range(100):
             result = client.get("/api/optimizer/runs/" + run["id"]).json()
@@ -459,12 +460,21 @@ def test_known_observed_failure_drives_candidate_when_current_baseline_is_lucky(
 
         assert result["status"] == "completed", result
         assert result["observed_failure_case_ids"] == [case["id"]]
-        assert result["baseline_metrics"]["failure_selected"]["ratio"] == 0
+        assert result["baseline_metrics"]["failure_selected"]["ratio"] == 1
         assert result["best_metrics"]["failure_selected"]["ratio"] == 1
-        assert result["promotion_eligible"] is True
+        assert result["promotion_eligible"] is False
         assert analysis_calls == 1
         iteration = client.get(f"/api/optimizer/runs/{run['id']}/iterations").json()[0]
-        assert iteration["diffs"][0]["failure_accuracy_before"]["ratio"] == 0
+        assert iteration["diffs"][0]["failure_accuracy_before"]["ratio"] == 1
+        assert iteration["candidate_version_id"]  # Candidate remains inspectable despite no proven gain.
+        assert iteration["accepted"] is False
+        assert result["baseline_metrics"]["case_results"][0]["total"] == repeats
+        bypass = client.post(f"/api/prompt-versions/{iteration['candidate_version_id']}/rollback", json={
+            "expected_profile_revision": profile["revision"],
+            "expected_active_version_id": result["baseline_version_id"],
+        })
+        assert bypass.status_code == 400
+        assert "未发布候选" in bypass.json()["detail"]
         latest = client.get(f"/api/optimizer/profiles/{profile['id']}/runs/latest").json()
         assert latest["id"] == run["id"]
 
@@ -1167,7 +1177,7 @@ def make_speed_case(client, count=1, observed=False):
     return run, store.read_json('optimizer/prompt_versions', run['baseline_version_id'])
 
 
-def test_observed_baseline_skips_api_but_candidate_and_final_are_fresh(tmp_path, monkeypatch):
+def test_historical_output_never_replaces_measured_baseline(tmp_path, monkeypatch):
     calls = 0
     async def fake(*args, **kwargs):
         nonlocal calls
@@ -1178,15 +1188,13 @@ def test_observed_baseline_skips_api_but_candidate_and_final_are_fresh(tmp_path,
         run, version = make_speed_case(client, observed=True)
         service = client.app.state.optimizer_service
         metrics, _, _ = asyncio.run(service._extract_version(run, version, 'baseline', None))
-        assert calls == 0 and metrics['failure_selected']['ratio'] == 0
+        assert calls == 1 and metrics['failure_selected']['ratio'] == 1
         record = client.app.state.store.read_json('optimizer/extractions', run['extraction_ids'][0])
-        assert record['evidence_source'] == 'observed_failure'
-        # Historical output must never masquerade as a cached real extraction.
-        assert service._cached_baseline(run, version, run['run_test_cases'][0], Connection(), [record]) is None
+        assert record['evidence_source'] == 'model'
         for phase in ['candidate', 'final_validation']:
             metrics, _, _ = asyncio.run(service._extract_version(run, version, phase, None))
             assert metrics['failure_selected']['ratio'] == 1
-        assert calls == 2
+        assert calls == 3
 
 
 def test_extractions_overlap_but_respect_concurrency_limit(tmp_path, monkeypatch):
@@ -1242,3 +1250,94 @@ def test_optimizer_deadline_includes_retry_backoff(tmp_path, monkeypatch):
     service = PromptOptimizerService(Store(tmp_path), lambda: Connection(), lambda: 'key')
     with pytest.raises(ValueError, match='总等待超过'):
         asyncio.run(service._complete(Connection().model_copy(update={'timeout': 0.03}), 'task', []))
+
+
+@pytest.mark.parametrize("final_degrades", [False, True])
+def test_repeated_baseline_catches_intermittent_failure_and_final_is_fresh(tmp_path, monkeypatch, final_degrades):
+    baseline_calls = candidate_calls = 0
+    field_id = None
+
+    async def model(connection, key, instructions, images, reference_text=""):
+        nonlocal baseline_calls, candidate_calls
+        if "Datara 字段级提取提示词优化器" in instructions:
+            return json.dumps({"analyses": [], "candidate_rules": [{
+                "field_id": field_id, "old_rule_hash": hashlib.sha256(b"").hexdigest(),
+                "new_rule": "提取购买方完整名称，排除送货公司。", "reason": "区分购买与送货角色。",
+            }]})
+        if "排除送货公司" in instructions:
+            candidate_calls += 1
+            value = ("Delivery Entity Ltd." if final_degrades and candidate_calls in {4, 5}
+                     else "Billing Entity Ltd.")
+        else:
+            baseline_calls += 1
+            value = "Delivery Entity Ltd." if baseline_calls == 2 else "Billing Entity Ltd."
+        return json.dumps({"AI_Document": {"company_name": value}})
+
+    monkeypatch.setattr("datara.optimizer.completion", model)
+    with TestClient(create_app(tmp_path)) as client:
+        run, version = make_speed_case(client)
+        store = client.app.state.store
+        field_id = run["selected_fields"][0]["field_id"]
+        run["settings"].update(evaluation_repeats=3, max_iterations=1, reuse_baseline_results=True)
+        store.write_json(store.path("optimizer/runs", run["id"]), run)
+        asyncio.run(client.app.state.optimizer_service.run(run["id"]))
+        result = store.read_json("optimizer/runs", run["id"])
+        assert result["status"] == "completed", result
+        assert result["promotion_eligible"] is (not final_degrades)
+        assert baseline_calls == 3 and candidate_calls == 6
+        assert result["baseline_metrics"]["failure_selected"]["ratio"] == pytest.approx(2 / 3)
+        assert result["baseline_metrics"]["case_results"][0]["passed"] == 2
+        assert result["final_validation_metrics"]["case_results"][0]["passed"] == (1 if final_degrades else 3)
+        assert len(result["result_summary"]["fixed"]) == (0 if final_degrades else 1)
+        assert len(result["result_summary"]["remaining_failures"]) == (1 if final_degrades else 0)
+        assert len(result["extraction_ids"]) == 9
+        records = [store.read_json("optimizer/extractions", i) for i in result["extraction_ids"]]
+        for phase in ("baseline", "candidate", "final_validation"):
+            assert {r["repetition"] for r in records if r["phase"] == phase} == {1, 2, 3}
+        assert all(not r["cache_hit"] for r in records)
+
+
+def test_repeated_mode_ignores_existing_cache_and_does_not_invent_failure(tmp_path, monkeypatch):
+    calls = 0
+    async def correct(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        return json.dumps({"AI_Document": {"company_name": "Billing Entity Ltd."}})
+    monkeypatch.setattr("datara.optimizer.completion", correct)
+    with TestClient(create_app(tmp_path)) as client:
+        run, version = make_speed_case(client)
+        store = client.app.state.store
+        service = client.app.state.optimizer_service
+        asyncio.run(service._extract_version(run, version, "baseline", None))  # Seed a valid cache entry.
+        run["settings"]["evaluation_repeats"] = 3
+        run["extraction_ids"] = []
+        store.write_json(store.path("optimizer/runs", run["id"]), run)
+        asyncio.run(service.run(run["id"]))
+        result = store.read_json("optimizer/runs", run["id"])
+        assert calls == 4  # All three trials were real calls, despite the seed cache.
+        assert result["cache_hits"] == 0
+        assert result["iteration_ids"] == []
+        assert result["promotion_eligible"] is False
+        assert "本次通过不代表长期稳定" in result["blocking_reasons"][0]
+
+
+def test_edit_historical_error_validates_clears_and_preserves_run_snapshot(tmp_path):
+    with TestClient(create_app(tmp_path)) as client:
+        run, _ = make_speed_case(client, observed=True)
+        case = run["run_test_cases"][0]
+        path = "/api/optimizer/test-cases/" + case["test_case_id"]
+        replacement = {"AI_Document": {"company_name": "Another wrong entity"}}
+        response = client.patch(path, json={"observed_output": replacement})
+        assert response.status_code == 200
+        assert response.json()["observed_output"] == replacement
+        snapshot = client.app.state.store.read_json("optimizer/runs", run["id"])
+        assert snapshot["run_test_cases"][0]["observed_output"] == case["observed_output"]
+        assert client.patch(path, json={"observed_output": {"unknown_table": {}}}).status_code == 400
+        assert client.patch(path, json={"observed_output": None}).json()["observed_output"] is None
+
+
+@pytest.mark.parametrize("repeats", [0, 11])
+def test_repeat_count_is_bounded(repeats):
+    from datara.optimizer_models import OptimizationSettings
+    with pytest.raises(ValueError):
+        OptimizationSettings(evaluation_repeats=repeats)

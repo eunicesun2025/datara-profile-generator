@@ -20,10 +20,10 @@ from dotenv import load_dotenv
 from .domain import (DEFAULT_SQL, SYSTEM, FieldDef, Model, Profile, TableDef, json_schema,
                      model_json, new_profile, normalize, strict_json, uid, validate_profile,
                      validate_result, infer_type, suggest_displays)
-from .generators import export_zip, fingerprint, preview, prompt
+from .generators import export_zip, fingerprint, preview, prompt, prompt_fingerprint
 from .importer import inspect_workbook, parse_fields
 from .media import render_pages
-from .provider import (Connection, ConnectionUpdate, completion, completion_retrying, draft_prompt,
+from .provider import (Connection, ConnectionUpdate, completion_retrying, draft_prompt,
                        parse_analysis, validate_connection)
 from .references import reference_text, MAX_TEXT
 from .storage import Conflict, Store
@@ -242,7 +242,15 @@ def create_app(data_dir: Path | None = None):
     @app.post("/api/preview")
     def get_preview(profile: Profile):
         normalize(profile)
-        return preview(profile)
+        version = None
+        if store.path("profiles", profile.id).exists():
+            saved = store.load(profile.id)
+            if prompt_fingerprint(saved) == prompt_fingerprint(profile):
+                version = ensure_prompt_version(store, saved)
+        result = preview(profile, rendered_prompt=version["rendered_prompt"] if version else None)
+        if "prompt" in result:
+            result["prompt_hash"] = hashlib.sha256(result["prompt"].encode()).hexdigest()
+        return result
 
     @app.post("/api/export")
     def export(profile: Profile):
@@ -251,7 +259,8 @@ def create_app(data_dir: Path | None = None):
         saved = store.load(profile.id)
         if saved.revision != profile.revision or fingerprint(saved) != fingerprint(profile):
             raise Conflict("请先保存当前修改，再导出相同版本")
-        archive = export_zip(saved)
+        version = ensure_prompt_version(store, saved)
+        archive = export_zip(saved, rendered_prompt=version["rendered_prompt"])
         identity = uid()
         store.path("exports", identity, ".zip").write_bytes(archive)
         store.write_json(store.path("exports", identity), {"profile": saved.model_dump(), "fingerprint": fingerprint(saved)})
@@ -359,15 +368,27 @@ def create_app(data_dir: Path | None = None):
 
     @app.post("/api/settings/test")
     async def test_connection():
-        raw = await completion(app.state.connection, app.state.api_key, '仅回复 JSON：{"ok":true}', [])
-        return {"ok": True, "message": "文本连接成功；图片能力请使用样本进行测试提取。", "response": raw[:200]}
+        c = app.state.connection.model_copy(deep=True)
+        key = app.state.api_key
+        results = []
+        for model in dict.fromkeys([c.model, c.optimizer_model.strip() or c.model,
+                                   c.extraction_model.strip() or c.model]):
+            target = c.model_copy(update={"model": model})
+            try:
+                await completion_retrying(target, key, '仅回复 JSON：{"ok":true}', [])
+                results.append({"model": model, "ok": True})
+            except ValueError as exc:
+                results.append({"model": model, "ok": False, "error": str(exc)})
+        ok = all(item["ok"] for item in results)
+        message = "；".join(item["model"] + ("：文本连接成功" if item["ok"] else "：" + item["error"])
+                            for item in results)
+        return {"ok": ok, "message": message + "。图片能力请使用样本进行测试提取。", "results": results}
 
-    async def run_job(identity, body, c, key):
+    async def run_job(identity, body, c, key, instructions):
         record = jobs[identity]
         try:
             folder, meta = sample_meta(body.sample_id)
             images = [folder / f"{i}.jpg" for i in range(1, meta["pages"] + 1)]
-            instructions = prompt(body.profile) if body.kind == "extract" else draft_prompt(body.profile, body.instructions)
             if body.kind == "draft" and body.profile.reference_ids:
                 raw = await completion_retrying(c, key, instructions, images,
                                                 reference_text=analysis_references(body.profile))
@@ -413,19 +434,30 @@ def create_app(data_dir: Path | None = None):
         if body.kind == "draft":
             analysis_references(body.profile)
         c = app.state.connection.model_copy(deep=True)
+        c.model = (c.extraction_model.strip() if body.kind == "extract" else c.optimizer_model.strip()) or c.model
         key = app.state.api_key
         validate_connection(c)
         if not key:
             raise ValueError("请先在模型设置中填写 API Key")
+        version = None
+        instructions = draft_prompt(body.profile, body.instructions) if body.kind == "draft" else prompt(body.profile)
+        if body.kind == "extract" and store.path("profiles", body.profile.id).exists():
+            saved = store.load(body.profile.id)
+            if prompt_fingerprint(saved) != prompt_fingerprint(body.profile):
+                raise Conflict("请先保存当前提示词修改，再进行测试提取")
+            version = ensure_prompt_version(store, saved)
+            instructions = version["rendered_prompt"]
         identity = uid()
         record = {"id": identity, "kind": body.kind, "status": "running", "profile_id": body.profile.id,
                   "profile_revision": body.profile.revision, "fingerprint": fingerprint(body.profile),
-                  "sample_id": body.sample_id, "model": c.model, "started_at": datetime.now(timezone.utc).isoformat()}
+                  "sample_id": body.sample_id, "model": c.model, "enable_thinking": c.enable_thinking,
+                  "timeout_seconds": c.timeout, "started_at": datetime.now(timezone.utc).isoformat()}
         if body.kind == "extract":
-            record["prompt_hash"] = hashlib.sha256(prompt(body.profile).encode()).hexdigest()
+            record["prompt_hash"] = hashlib.sha256(instructions.encode()).hexdigest()
+            record["prompt_version_id"] = version["id"] if version else None
         jobs[identity] = record
         store.write_json(store.path("tests", identity), record)
-        tasks[identity] = asyncio.create_task(run_job(identity, body, c, key))
+        tasks[identity] = asyncio.create_task(run_job(identity, body, c, key, instructions))
         return record
 
     @app.get("/api/jobs/{identity}")
@@ -469,7 +501,8 @@ def create_app(data_dir: Path | None = None):
                 t = TableDef(name=name, role="detail", parent_table_id=p.tables[0].id,
                              fields=[FieldDef(name=n, description=d, data_type=dt) for n, d, dt in fields])
                 if name == "AI_Invoice_Detail":
-                    t.fields.append(FieldDef(name="item", description="明细行号", source="System", population="Datara 按数组顺序从 1 递增"))
+                    t.fields.append(FieldDef(name="item", description="明细行号", source="AI",
+                                             extraction="不要从图片读取行号；按 AI_Invoice_Detail 数组顺序从 1 开始递增，以字符串输出（如 \"1\"、\"2\"）。"))
                 p.tables.append(t)
         p.tables[0].fields = [FieldDef(name=n, description=d, data_type=dt, is_required=n in {"invoice_number", "amount"}) for n, d, dt in defs] + p.tables[0].fields
         p.tables[0].fields.append(FieldDef(name="company_code", description="公司代码", source="System", population="Datara 根据公司名称查询"))
