@@ -73,7 +73,7 @@ flowchart LR
 | `datara/media.py` | Converts PDF pages and supported images into bounded JPEG pages | No OCR or field extraction; PDF processing is serialized by a global lock |
 | `datara/provider.py` | Connection model/validation; OpenAI-compatible multimodal request; analysis prompt; strict parsing/filtering of Profile and AI-field add/update suggestions | One Chat Completions protocol only; no retries, streaming, native PDF, tool calling, or enforced structured-output mode; suggestions require user application |
 | `datara/references.py` | Extracts bounded text from XLSX, DOCX, TXT, Markdown, JSON, CSV, and SQL uploads | Treats content only as model context; no macros/code execution, OCR, PDF parsing, or semantic trust decision |
-| `datara/storage.py` | Directory creation, identifier-safe paths, atomic JSON writes, Profile listing/loading, optimistic revision saves, optimizer version allocation | Local filesystem only; the re-entrant write lock is process-local, not a cross-process lock |
+| `datara/storage.py` | Directory creation, identifier-safe paths, atomic JSON writes, Profile listing/loading, optimistic revision saves, cascading Profile deletion, optimizer version allocation | Local filesystem only; the re-entrant write lock is process-local, not a cross-process lock |
 | `datara/optimizer*.py`, `evaluation.py` | Deterministic optimizer state machine, test/ground-truth snapshots, field comparisons, regression gates, prompt versions, promotion, and rollback | Qwen proposes field rules; application code owns mutation, scoring, selection, and release gates |
 | `scripts/diagnose.py` | Read-only dependency, local port, data-directory, proxy/CA, and optional endpoint diagnostics | Does not read API keys or send documents |
 | `tests/` | Executable assertions for core generation, import, API, security, provider, and result-validation behavior | Provider tests use mock HTTP; no live model, Datara, or SQL Server integration test |
@@ -83,7 +83,7 @@ flowchart LR
 | Area | Routes |
 |---|---|
 | Shell/diagnostics | `GET /`, `GET /api/meta`, `GET /api/health` |
-| Profiles | `GET /api/profiles`, `POST /api/profiles/new`, `GET /api/profiles/{id}`, `POST /api/profiles/save`, `POST /api/normalize` |
+| Profiles | `GET /api/profiles`, `POST /api/profiles/new`, `GET /api/profiles/{id}`, `POST /api/profiles/save`, `DELETE /api/profiles/{id}`, `POST /api/normalize` |
 | Local field assistance | `POST /api/fields/suggest` |
 | Generation | `POST /api/preview`, `POST /api/export`, `POST /api/schema` |
 | Result checking | `POST /api/results/validate` |
@@ -96,7 +96,7 @@ flowchart LR
 | Prompt versions | `GET /api/profiles/{id}/prompt-versions`, `GET /api/prompt-versions/{id}`, `GET /api/prompt-versions/compare`, promotion, and rollback routes |
 | Built-in examples | `POST /api/demo/{cheque|invoice}` |
 
-There are no update/delete-specific Profile endpoints: edits replace a whole Profile through the save route, and no HTTP deletion operation exists for stored entities.
+There are no partial-update Profile endpoints: edits replace a whole Profile through the save route. `DELETE /api/profiles/{id}` is the only deletion operation. It removes the Profile together with the records that belong exclusively to it (prompt versions and prompt state, optimizer test cases, ground truth, runs, iterations, extractions, promotions, model job records, and export metadata/ZIP archives), and it is refused with `409` while a model job or optimizer run for that Profile is still live. Sample, reference, and import uploads are shared workspace objects, so they are deliberately kept; there is still no deletion route for them.
 
 ## Main module/component relationships
 
@@ -317,3 +317,4 @@ The table maps each major architecture statement to executable modules and symbo
 | A-23 | There is no durable queue, shared storage, or SQL/Datara deployment path | Not implemented | task creation in `datara/app.py:create_app`; filesystem-only `datara/storage.py:Store`; `pyproject.toml` |
 | A-24 | Reference files are bounded, converted to text, and isolated from system instructions | Implemented | `datara/references.py:reference_text`; `datara/provider.py:completion,draft_prompt`; tests in `tests/test_analysis.py` |
 | A-25 | Semantic type and HeadDisplay suggestions are available without a model | Implemented | `datara/domain.py:infer_type,suggest_displays`; `datara/app.py` route `/api/fields/suggest`; `datara/importer.py` |
+| A-26 | Deleting a Profile cascades to its derived records, keeps shared uploads, and is blocked while a job or optimizer run is live | Implemented | `datara/storage.py:Store.delete_profile,PROFILE_OWNED_FOLDERS`; `datara/app.py` route `DELETE /api/profiles/{id}`; tests in `tests/test_app.py` |

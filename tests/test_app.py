@@ -124,6 +124,64 @@ def test_save_reload_conflict_and_export(client):
     assert client.post("/api/export", json=saved).status_code == 409
 
 
+def test_delete_profile_removes_profile_and_derived_records(client, tmp_path):
+    """删除 Profile 必须级联清理它独有的记录，同时保留共享的样张上传。"""
+    saved = client.post("/api/demo/invoice").json()      # 示例 Profile 可直接导出，便于验证 exports 清理
+    saved = client.post("/api/profiles/save", json=saved).json()
+    identity = saved["id"]
+    # 导入提示词会额外产生一个 imported 版本，正好验证 prompt_versions 被一并清理
+    imported = client.post(f"/api/profiles/{identity}/prompt-versions/import", json={
+        "expected_profile_revision": saved["revision"],
+        "prompt_text": "旧系统的提示词正文，用于确认导入版本会随 Profile 一起被清理。"})
+    assert imported.status_code == 200, imported.text
+    # 样张是共享工作区对象：删除 Profile 后仍必须留在磁盘上
+    sample_dir = tmp_path / "samples" / "kept-sample"
+    sample_dir.mkdir(parents=True)
+    (sample_dir / "meta.json").write_text(
+        json.dumps({"id": "kept-sample", "name": "样本.pdf", "pages": 1, "suffix": ".pdf"}), encoding="utf-8")
+    saved["sample_ids"] = ["kept-sample"]
+    saved = client.post("/api/profiles/save", json=saved).json()
+    assert client.post("/api/export", json=saved).status_code == 200
+    (tmp_path / "tests" / "job-1.json").write_text(json.dumps(
+        {"id": "job-1", "profile_id": identity, "status": "done", "started_at": "2026-01-01T00:00:00+00:00"}),
+        encoding="utf-8")
+
+    response = client.delete(f"/api/profiles/{identity}")
+    assert response.status_code == 200, response.text
+    removed = response.json()["removed"]
+    assert removed["profiles"] == 1
+    assert removed["optimizer/prompt_versions"] >= 2      # generated_baseline + imported
+    assert removed["optimizer/prompt_states"] == 1
+    assert removed["tests"] == 1
+    assert removed["exports"] == 1
+    assert not (tmp_path / "profiles" / f"{identity}.json").exists()
+    assert not list((tmp_path / "exports").glob("*.zip"))  # 导出压缩包一并清理
+    assert (sample_dir / "meta.json").exists()            # 上传的样张不被删除
+    assert identity not in [p["id"] for p in client.get("/api/profiles").json()]
+    assert client.get(f"/api/profiles/{identity}").status_code == 404
+    assert client.get(f"/api/profiles/{identity}/prompt-versions").status_code == 404
+
+
+def test_delete_profile_guards_unknown_unsafe_and_running(client, tmp_path):
+    """未知 ID → 404，不安全 ID → 400，仍有优化任务在跑 → 409 且不得删掉任何数据。"""
+    assert client.delete("/api/profiles/does-not-exist").status_code == 404
+    assert client.delete("/api/profiles/bad%20id").status_code == 400
+
+    saved = client.post("/api/profiles/save", json=new_profile("运行中", "AI_Busy").model_dump()).json()
+    run_path = tmp_path / "optimizer" / "runs" / "run-1.json"
+    run_path.write_text(json.dumps({"id": "run-1", "profile_id": saved["id"], "status": "optimizing",
+                                    "created_at": "2026-01-01T00:00:00+00:00"}), encoding="utf-8")
+    assert client.delete(f"/api/profiles/{saved['id']}").status_code == 409
+    assert (tmp_path / "profiles" / f"{saved['id']}.json").exists()
+
+    run_path.write_text(json.dumps({"id": "run-1", "profile_id": saved["id"], "status": "completed",
+                                    "created_at": "2026-01-01T00:00:00+00:00"}), encoding="utf-8")
+    response = client.delete(f"/api/profiles/{saved['id']}")
+    assert response.status_code == 200, response.text
+    assert response.json()["removed"]["optimizer/runs"] == 1
+    assert not run_path.exists()
+
+
 def test_settings_never_persist_or_return_api_key(client, tmp_path):
     data = {"base_url": "https://example.test/v1", "model": "test-vision", "api_key": "test-secret-token"}
     response = client.post("/api/settings", json=data)

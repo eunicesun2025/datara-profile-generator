@@ -195,6 +195,24 @@ def create_app(data_dir: Path | None = None):
     def get_profile(identity: str):
         return store.load(identity)
 
+    @app.delete("/api/profiles/{identity}")
+    def delete_profile(identity: str):
+        """Delete one Profile with its prompt versions, optimizer records, jobs, and exports.
+
+        Refuses while a model job or optimizer run for this Profile is still live, because a
+        running task would keep writing records for a Profile that no longer exists.
+        """
+        profile = store.load(identity)
+        live_statuses = {"queued", "baselining", "optimizing", "validating"}
+        busy_jobs = [r for r in jobs.values()
+                     if r.get("profile_id") == identity and r.get("status") == "running"]
+        busy_runs = [r for r in store.list_json("optimizer/runs")
+                     if r.get("profile_id") == identity and r.get("status") in live_statuses]
+        if busy_jobs or busy_runs:
+            raise Conflict("该 Profile 还有正在运行的模型或优化任务，请等待完成或先取消后再删除")
+        return {"ok": True, "id": identity, "name": profile.name,
+                "removed": store.delete_profile(identity)}
+
     @app.post("/api/profiles/save")
     def save_profile(profile: Profile):
         normalize(profile)

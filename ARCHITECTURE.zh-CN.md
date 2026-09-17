@@ -71,7 +71,7 @@ flowchart LR
 | `datara/media.py` | PDF/PNG/JPEG 转换为尺寸受控的 JPEG 页面 | 不做 OCR；PDF 渲染使用全局锁串行执行 |
 | `datara/references.py` | 读取 XLSX、DOCX、TXT、MD、JSON、CSV、SQL 为有界文本 | 不执行宏、公式、SQL 或文件内指令；扫描件需走样张路径 |
 | `datara/provider.py` | 模型连接配置、Chat Completions 多模态请求、瞬时失败重试、分析提示词、返回解析与过滤 | 无流式输出、原生 PDF、工具调用或协议级 JSON Schema |
-| `datara/storage.py` | 安全路径、目录、原子 JSON 写入、Profile 列表/读取、乐观版本保存和优化版本分配 | 仅本地文件系统；可重入写锁只在单进程内有效 |
+| `datara/storage.py` | 安全路径、目录、原子 JSON 写入、Profile 列表/读取、乐观版本保存、Profile 级联删除和优化版本分配 | 仅本地文件系统；可重入写锁只在单进程内有效 |
 | `datara/optimizer*.py`、`evaluation.py` | 固定优化状态机、测试/标准答案快照、字段比较、回归门禁、提示词版本、发布与回滚 | Qwen 只建议字段规则；应用代码负责变更、评分、选择和发布门禁 |
 | `scripts/diagnose.py` | 只读检查依赖、端口、数据目录、代理、CA 和可选端点 | 不读取 API Key，不上传文档 |
 
@@ -80,7 +80,7 @@ flowchart LR
 | 功能 | 路由 |
 |---|---|
 | 页面与健康 | `GET /`、`GET /api/meta`、`GET /api/health` |
-| Profile | `GET /api/profiles`、`POST /api/profiles/new`、`GET /api/profiles/{id}`、`POST /api/profiles/save`、`POST /api/normalize` |
+| Profile | `GET /api/profiles`、`POST /api/profiles/new`、`GET /api/profiles/{id}`、`POST /api/profiles/save`、`DELETE /api/profiles/{id}`、`POST /api/normalize` |
 | 本地字段建议 | `POST /api/fields/suggest` |
 | 生成 | `POST /api/preview`、`POST /api/export`、`POST /api/schema` |
 | 结果校验 | `POST /api/results/validate` |
@@ -93,7 +93,7 @@ flowchart LR
 | 提示词版本 | `GET /api/profiles/{id}/prompt-versions`、`GET /api/prompt-versions/{id}`、版本比较、发布及回滚路由 |
 | 示例 | `POST /api/demo/{cheque|invoice}` |
 
-没有 Profile 或上传对象的删除接口。Profile 更新通过提交完整对象完成。
+没有 Profile 的局部更新接口，修改通过提交完整对象完成。`DELETE /api/profiles/{id}` 是唯一的删除操作：它会连同该 Profile 独有的记录一起删除（提示词版本与提示词状态、优化案例、标准答案、优化任务、轮次、提取记录、发布记录、模型任务记录和导出文件/ZIP），并在该 Profile 仍有模型任务或优化任务运行时返回 `409` 拒绝执行。样张、参考文件和 Excel 导入属于共享的工作区对象，删除 Profile 时会保留；它们目前仍没有删除接口。
 
 ## 主要模块关系
 
@@ -248,3 +248,4 @@ API Key 不写入 `connection.json`，只保存在当前进程内或来自环境
 | A-13 | API Key 不持久化 | 已实现 | `datara/app.py` 设置路由；`tests/test_app.py` |
 | A-14 | SQL 只生成不执行 | 已实现/边界推断 | `datara/generators.py:sql`；`pyproject.toml` 无数据库客户端 |
 | A-15 | 没有持久队列、共享存储或 Datara 发布路径 | 未实现 | `datara/app.py` 内存任务；`datara/storage.py:Store` |
+| A-16 | 删除 Profile 会级联清理其独有记录、保留共享上传，并在任务运行时被拒绝 | 已实现 | `datara/storage.py:Store.delete_profile,PROFILE_OWNED_FOLDERS`；`datara/app.py` 的 `DELETE /api/profiles/{id}`；`tests/test_app.py` |

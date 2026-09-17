@@ -62,6 +62,11 @@ main{max-width:1600px;margin:auto;padding:36px 38px 50px}
 .profile-card p{font-size:11px;margin:0;color:#909b93}
 .profile-card .card-bottom{border-top:1px solid #eef1ed;margin-top:18px;padding-top:12px;display:flex;justify-content:space-between;font-size:11px;color:#7e8c81}
 .file-mark{font-size:11px;letter-spacing:.7px;background:#eef4ec;padding:7px 9px;color:var(--green);border-radius:6px}
+.profile-card-wrap{position:relative}
+.profile-card-wrap .profile-card{width:100%}
+.profile-card-delete{position:absolute;top:16px;right:14px;color:var(--red);opacity:0;transition:opacity .15s ease}
+.profile-card-wrap:hover .profile-card-delete,.profile-card-delete:focus-visible{opacity:1}
+@media (hover:none){.profile-card-delete{opacity:.75}}
 .empty{padding:38px;text-align:center;background:white;border:1px dashed #d4dfd4;border-radius:12px;color:#8a978d}
 .empty h3{color:#4c6655}
 .steps{display:flex;gap:25px;border-bottom:1px solid var(--line);margin-bottom:25px}
