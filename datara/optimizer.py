@@ -9,7 +9,7 @@ import time
 from datetime import datetime, timezone
 from typing import Callable
 
-from .domain import Profile, normalize, strict_json, uid, validate_profile, validate_result
+from .domain import Profile, model_json, normalize, uid, validate_profile, validate_result
 from .evaluation import default_policy, evaluate_output, summarize_metrics
 from .generators import (fingerprint, profile_with_field_rules, prompt, prompt_components,
                          text_hash)
@@ -22,6 +22,11 @@ from .storage import Conflict, Store
 IMPORTED_OVERRIDE_MARKER = "===== DATARA SELECTED FIELD OVERRIDES ====="
 MAX_ANALYSIS_IMAGES = 8
 BASELINE_CACHE_MAX_AGE_SECONDS = 24 * 60 * 60
+# Bumped when the model-response parsing rules change (v2: tolerate a single code fence
+# wrapping the whole response). The baseline cache reuses stored parsed_output as-is, so
+# records parsed under older rules — e.g. fenced responses saved as {} with an
+# "Expecting value" validation error — must never satisfy a newer run.
+RESPONSE_PARSER_VERSION = 2
 logger = logging.getLogger(__name__)
 
 
@@ -607,6 +612,7 @@ class PromptOptimizerService:
                 if row.get("field_id") in required and not row.get("indeterminate")
             }
             if (record.get("status") != "completed" or
+                    record.get("response_parser_version") != RESPONSE_PARSER_VERSION or
                     record.get("evidence_source") == "observed_failure" or
                     not required or not required.issubset(evaluated) or
                     record.get("prompt_hash") != version["prompt_hash"] or
@@ -744,7 +750,7 @@ class PromptOptimizerService:
                         f"{connection.model} 时出错{budget}：{message}"
                     ) from exc
                 try:
-                    parsed = strict_json(raw)
+                    parsed = model_json(raw)
                     validation = validate_result(profile, parsed)
                 except ValueError as exc:
                     parsed = {}
@@ -769,6 +775,7 @@ class PromptOptimizerService:
                 "json_structure_hash": version["json_structure_hash"],
                 "model_id": connection.model, "status": "completed", "attempt_count": attempt_count,
                 "max_tokens": connection.max_tokens, "enable_thinking": connection.enable_thinking,
+                "response_parser_version": RESPONSE_PARSER_VERSION,
                 "cache_hit": bool(cached), "cached_from_extraction_id": cached["id"] if cached else None,
                 "evidence_source": "observed_failure" if reuse_observed else "model",
                 "latency_ms": elapsed, "raw_response": raw, "parsed_output": parsed,
@@ -911,7 +918,7 @@ class PromptOptimizerService:
                 raw, _ = await self._complete(connection, instructions, analysis_images,
                                               reference_text=original_prompt)
             try:
-                parsed = CandidateResponse.model_validate(strict_json(raw))
+                parsed = CandidateResponse.model_validate(model_json(raw))
                 mismatched_rules = [rule.field_id for rule in parsed.candidate_rules
                                     if not candidate_uses_language(rule.new_rule, language)]
                 if mismatched_rules:

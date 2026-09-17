@@ -36,6 +36,18 @@ def test_draft_unknown_table_rejected():
         parse_draft('{"fields":[{"table_name":"missing","name":"amount"}]}', new_profile())
 
 
+def test_draft_parses_a_fenced_model_response():
+    """The analysis model may wrap its JSON in a fence despite the no-Markdown instruction."""
+    p = new_profile()
+    raw = '```json\n' + json.dumps({"fields": [
+        {"table_name": "AI_Document", "name": "amount", "description": "金额",
+         "data_type": "Decimal", "evidence": "第1页"},
+    ]}) + '\n```'
+    suggestions = parse_draft(raw, p)
+    assert len(suggestions) == 1
+    assert suggestions[0]["field"]["name"] == "amount"
+
+
 def test_compatible_http_request_contains_visual_input(tmp_path, monkeypatch):
     image = tmp_path / "1.jpg"
     image.write_bytes(b"example-jpeg-bytes")

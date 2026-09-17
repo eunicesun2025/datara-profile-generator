@@ -6,8 +6,8 @@ import zipfile
 import pytest
 from openpyxl import load_workbook
 
-from datara.domain import (FieldDef, TableDef, effective_sql, new_profile, normalize,
-                           strict_json, validate_profile, validate_result)
+from datara.domain import (FieldDef, TableDef, effective_sql, model_json, new_profile,
+                           normalize, strict_json, validate_profile, validate_result)
 from datara.generators import export_zip, json_structure, mapping_rows, prompt, sql
 
 
@@ -121,6 +121,18 @@ def test_duplicate_keys_non_json_and_nonfinite_are_rejected():
     for value in ['{"a":1,"a":2}', '{"a":NaN}', '```json\n{}\n```']:
         with pytest.raises(ValueError):
             strict_json(value)
+
+
+def test_model_json_accepts_only_a_full_response_code_fence():
+    """A fenced model output used to be scored as empty despite holding the right value."""
+    assert model_json('```json\n{"a": 1}\n```') == {"a": 1}
+    assert model_json('```\n{"a": 1}\n```') == {"a": 1}
+    assert model_json('{"a": 1}') == {"a": 1}
+    # The fence must enclose the entire response, and strictness survives inside it.
+    for value in ['说明 ```json\n{"a":1}\n```', '```json\n{"a":1}\n``` 说明',
+                  '```json\n{"a":1,"a":2}\n```', '```json\nNaN\n```', '```json\n{"a":1}']:
+        with pytest.raises(ValueError):
+            model_json(value)
 
 
 def test_conflicting_missing_value_rule_is_rejected(profile):

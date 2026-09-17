@@ -10,7 +10,7 @@ from urllib.parse import urlparse
 import httpx
 from pydantic import Field
 
-from .domain import Model, Profile, FieldDef, SYSTEM, strict_json, snake_name, infer_type
+from .domain import Model, Profile, FieldDef, SYSTEM, model_json, snake_name, infer_type
 
 logger = logging.getLogger(__name__)
 
@@ -220,7 +220,7 @@ def draft_prompt(p: Profile, request: str) -> str:
 
 
 def parse_analysis(raw: str, p: Profile) -> dict:
-    obj = strict_json(raw)
+    obj = model_json(raw)
     if not isinstance(obj, dict) or not isinstance(obj.get("fields"), list):
         raise ValueError("AI 草稿需要返回 fields 数组")
     if len(obj["fields"]) > 100:

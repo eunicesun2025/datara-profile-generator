@@ -12,9 +12,10 @@ from datara.app import create_app
 from datara.domain import FieldDef, TableDef, new_profile, normalize, validate_profile
 from datara.evaluation import compare_values, evaluate_output
 from datara.generators import profile_with_field_rules, prompt_components
-from datara.optimizer import (IMPORTED_OVERRIDE_MARKER, PromptOptimizerService,
-                              candidate_uses_language, create_run_record, ensure_prompt_version,
-                              import_prompt_version, imported_prompt_field_rules, prompt_language)
+from datara.optimizer import (IMPORTED_OVERRIDE_MARKER, RESPONSE_PARSER_VERSION,
+                              PromptOptimizerService, candidate_uses_language, create_run_record,
+                              ensure_prompt_version, import_prompt_version,
+                              imported_prompt_field_rules, prompt_language)
 from datara.optimizer_models import CandidateResponse, ComparisonPolicy, OptimizationRunCreate
 from datara.provider import Connection
 from datara.storage import Store
@@ -301,6 +302,97 @@ def test_baseline_cache_reuses_selected_fields_when_unselected_structure_is_inva
         asyncio.run(service._extract_version(second, version, "baseline", None))
         assert calls == 1
         assert second["cache_hits"] == 1
+
+
+def test_fenced_extraction_response_is_parsed_and_scored(tmp_path, monkeypatch):
+    """A correct value wrapped in a ```json fence used to be scored as missing.
+
+    Regression from runs 5214731e / f83dca18 (2026-09-17): candidate extractions
+    returned the expected value inside a Markdown fence, strict_json raised
+    'Expecting value: line 1 column 1 (char 0)', parsed_output fell back to {}, and
+    both runs early-stopped as no_improvement after two rejected rounds that had
+    actually fixed the case.
+    """
+    async def fenced_completion(connection, key, instructions, images, reference_text=""):
+        return '```json\n{"AI_Document": {"company_name": "Linde Huizhou"}}\n```'
+
+    monkeypatch.setattr("datara.optimizer.completion", fenced_completion)
+    with TestClient(create_app(tmp_path)) as client:
+        profile = new_profile("Fenced extraction response")
+        company = FieldDef(name="company_name")
+        profile.tables[0].fields[:0] = [company]
+        profile = client.post("/api/profiles/save", json=profile.model_dump()).json()
+        sample = client.post("/api/samples", files={"file": ("invoice.png", image_bytes())}).json()
+        case = client.post(f"/api/optimizer/profiles/{profile['id']}/test-cases", json={
+            "sample_id": sample["id"], "name": "invoice", "dataset_role": "failure",
+            "ground_truth": {"AI_Document": {"company_name": "Linde Huizhou"}},
+        }).json()
+        store = client.app.state.store
+        body = OptimizationRunCreate(
+            profile_id=profile["id"], profile_revision=profile["revision"],
+            selected_field_ids=[company.id], failure_test_case_ids=[case["id"]],
+        )
+        service = PromptOptimizerService(
+            store, lambda: Connection(base_url="https://cache.test/v1", model="qwen-vision"),
+            lambda: "key")
+        run = create_run_record(store, body)
+        version = store.read_json("optimizer/prompt_versions", run["baseline_version_id"])
+        metrics, failure_rows, _ = asyncio.run(
+            service._extract_version(run, version, "baseline", None))
+        extraction = store.read_json("optimizer/extractions", run["extraction_ids"][0])
+        assert extraction["parsed_output"] == {"AI_Document": {"company_name": "Linde Huizhou"}}
+        assert not any("Expecting value" in e for e in extraction["structure_validation"]["errors"])
+        selected = [row for row in failure_rows if row["selected"]]
+        assert selected and all(row["matched"] for row in selected)
+        assert metrics["failure_selected"]["ratio"] == 1.0
+
+
+def test_baseline_cache_ignores_records_parsed_by_older_rules(tmp_path, monkeypatch):
+    """Extractions cached before the code-fence parser fix must not be reused.
+
+    Older records stored fenced responses as parsed_output={} with 'Expecting value'
+    validation errors. Reusing them would keep scoring new runs against an empty
+    baseline until the 24h TTL expires.
+    """
+    calls = 0
+
+    async def fake_completion(connection, key, instructions, images, reference_text=""):
+        nonlocal calls
+        calls += 1
+        return json.dumps({"AI_Document": {"company_name": "Linde Huizhou"}})
+
+    monkeypatch.setattr("datara.optimizer.completion", fake_completion)
+    with TestClient(create_app(tmp_path)) as client:
+        profile = new_profile("Stale parser cache")
+        company = FieldDef(name="company_name")
+        profile.tables[0].fields[:0] = [company]
+        profile = client.post("/api/profiles/save", json=profile.model_dump()).json()
+        sample = client.post("/api/samples", files={"file": ("invoice.png", image_bytes())}).json()
+        case = client.post(f"/api/optimizer/profiles/{profile['id']}/test-cases", json={
+            "sample_id": sample["id"], "name": "invoice", "dataset_role": "failure",
+            "ground_truth": {"AI_Document": {"company_name": "Linde Huizhou"}},
+        }).json()
+        store = client.app.state.store
+        body = OptimizationRunCreate(
+            profile_id=profile["id"], profile_revision=profile["revision"],
+            selected_field_ids=[company.id], failure_test_case_ids=[case["id"]],
+        )
+        service = PromptOptimizerService(
+            store, lambda: Connection(base_url="https://cache.test/v1", model="qwen-vision"),
+            lambda: "key")
+        first = create_run_record(store, body)
+        version = store.read_json("optimizer/prompt_versions", first["baseline_version_id"])
+        asyncio.run(service._extract_version(first, version, "baseline", None))
+        assert calls == 1
+        extraction = store.read_json("optimizer/extractions", first["extraction_ids"][0])
+        assert extraction["response_parser_version"] == RESPONSE_PARSER_VERSION
+        # Simulate a record written by the pre-fix parser.
+        extraction["response_parser_version"] = RESPONSE_PARSER_VERSION - 1
+        store.write_json(store.path("optimizer/extractions", extraction["id"]), extraction)
+        second = create_run_record(store, body)
+        asyncio.run(service._extract_version(second, version, "baseline", None))
+        assert calls == 2
+        assert second["cache_hits"] == 0
 
 
 def test_known_observed_failure_drives_candidate_when_current_baseline_is_lucky(tmp_path, monkeypatch):

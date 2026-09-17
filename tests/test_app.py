@@ -241,3 +241,27 @@ def test_extract_job_survives_a_transient_connection_failure(client, monkeypatch
         time.sleep(.05)
     assert calls["n"] == 2
     assert result["status"] == "completed"
+
+
+def test_extract_job_parses_a_fenced_model_response(client, monkeypatch):
+    """A model response wrapped in a Markdown fence must not fail 测试提取.
+
+    Regression: fenced responses parsed to {}, the page showed
+    'Expecting value: line 1 column 1 (char 0)' and an empty result even though the
+    extraction itself had succeeded.
+    """
+    async def fenced(c,key,instructions,images,reference_text=""):
+        return '```json\n{"AI_Document":{"amount":null}}\n```'
+    monkeypatch.setattr("datara.app.completion_retrying",fenced)
+    client.post("/api/settings",json={"base_url":"https://example.test/v1","model":"test","api_key":"test-only-key"})
+    sample=client.post("/api/samples",files={"file":("a.png",image_bytes())}).json()
+    p=new_profile();p.tables[0].fields.append(FieldDef(name="amount",data_type="Decimal",is_required=True))
+    job=client.post("/api/jobs",json={"profile":p.model_dump(),"sample_id":sample["id"],"kind":"extract"}).json()
+    result={}
+    for _ in range(30):
+        result=client.get("/api/jobs/"+job["id"]).json()
+        if result["status"] != "running": break
+        time.sleep(.01)
+    assert result["status"] == "completed"
+    assert result["result"] == {"AI_Document": {"amount": None}}
+    assert result["validation"]["status"] == "valid"

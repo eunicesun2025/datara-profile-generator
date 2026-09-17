@@ -370,3 +370,33 @@ def strict_json(raw: str):
     def invalid_constant(s):
         raise ValueError(f"非法 JSON 数值：{s}")
     return json.loads(raw, object_pairs_hook=pairs, parse_constant=invalid_constant)
+
+
+# Vision models intermittently wrap the whole response in a Markdown code fence
+# (observed with qwen3.8-max-0902 on 2026-09-17: "```json\n{...}\n```") even though
+# every prompt says 只返回 JSON 对象，不要 Markdown. The pattern matches only when the
+# fence encloses the *entire* response, so leading/trailing prose still fails to parse.
+_CODE_FENCE = re.compile(r"```[^\n]*\n(.*)\n?```", re.DOTALL)
+
+
+def strip_code_fence(raw: str) -> str:
+    """Return the body when a model response is exactly one Markdown code fence.
+
+    Responses without a fence, or with any text outside it, are returned unchanged so
+    :func:`strict_json` still rejects them.
+    """
+    match = _CODE_FENCE.fullmatch(raw.strip())
+    return match.group(1) if match else raw
+
+
+def model_json(raw: str):
+    """Parse a raw model response with :func:`strict_json`, tolerating one code fence.
+
+    All strictness (duplicate keys, non-finite constants) still applies inside the
+    fence. User-supplied JSON (ground truth, manual result validation) must keep using
+    :func:`strict_json` directly: the fence tolerance exists because a fenced but
+    otherwise correct extraction used to raise "Expecting value: line 1 column 1
+    (char 0)", callers fell back to an empty object, and the optimizer rejected
+    candidates that had actually fixed the failing case.
+    """
+    return strict_json(strip_code_fence(raw))

@@ -18,8 +18,8 @@ from fastapi.staticfiles import StaticFiles
 from dotenv import load_dotenv
 
 from .domain import (DEFAULT_SQL, SYSTEM, FieldDef, Model, Profile, TableDef, json_schema,
-                     new_profile, normalize, strict_json, uid, validate_profile, validate_result,
-                     infer_type, suggest_displays)
+                     model_json, new_profile, normalize, strict_json, uid, validate_profile,
+                     validate_result, infer_type, suggest_displays)
 from .generators import export_zip, fingerprint, preview, prompt
 from .importer import inspect_workbook, parse_fields
 from .media import render_pages
@@ -363,7 +363,7 @@ def create_app(data_dir: Path | None = None):
                 record.update(parse_analysis(raw, body.profile))
             else:
                 try:
-                    value = strict_json(raw)
+                    value = model_json(raw)
                     record["result"] = value
                     record["validation"] = validate_result(body.profile, value)
                 except ValueError as e:
