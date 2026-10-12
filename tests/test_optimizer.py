@@ -95,6 +95,46 @@ def test_published_prompt_rules_are_mapped_to_profile_fields_without_absorbing_n
                 if field["field_id"] == company.id)["extraction_rule"] == rules[company.id]
 
 
+def test_numbered_mixed_case_import_preserves_rules_and_section_boundaries(tmp_path):
+    store = Store(tmp_path)
+    profile = new_profile("Numbered cheque rules")
+    fields = [FieldDef(name=name) for name in
+              ("cheque_date", "customer_name", "cheque_number", "currency")]
+    amount = FieldDef(name="amount", data_type="Decimal")
+    profile.tables[0].fields[:0] = fields + [amount]
+    profile = store.save(profile)
+    published = '''支票信息提取规则，严格按 JSON 输出。
+3.1 Cheque_Date: 读取日期，无法识别返回 null。
+3.4 CUSTOMER_NAME：读取出票人，保留原始大小写。
+3.3 cheque_number: 读取 MICR 第一段，保留前导零。
+请关注底部区域。
+识别规则：
+1. 使用 E-13B 字符集。
+2. 保留全部数字。
+3.8 Amount: 读取金额，无法识别返回 0.0。
+3.19 Currency:
+读取货币符号。
+4. JSON 输出要求
+只输出 JSON，不要说明。
+'''
+    rules = imported_prompt_field_rules(profile, published)
+    assert set(rules) == {f.id for f in fields + [amount]}
+    assert rules[fields[0].id] == "读取日期，无法识别返回 null。"
+    assert rules[fields[1].id] == "读取出票人，保留原始大小写。"
+    assert rules[fields[2].id] == ("读取 MICR 第一段，保留前导零。\n请关注底部区域。\n"
+                                    "1. 使用 E-13B 字符集。\n2. 保留全部数字。")
+    assert rules[fields[3].id] == "读取货币符号。"
+    imported = import_prompt_version(store, profile, published, profile.revision)
+    assert set(imported["mapped_field_ids"]) == {f.id for f in fields}
+    assert imported["rejected_field_ids"] == [amount.id]
+    assert imported["imported_prompt_base"] == published.strip()
+    # Re-import is idempotent and does not create another Profile revision.
+    again = import_prompt_version(store, store.load(profile.id), published,
+                                  imported["profile"]["revision"])
+    assert again["id"] == imported["id"]
+    assert again["updated_field_ids"] == []
+
+
 def test_imported_baseline_cannot_silently_optimize_an_unmapped_empty_rule(tmp_path):
     store = Store(tmp_path)
     profile = new_profile("Unmapped published rules")
@@ -462,12 +502,14 @@ def test_known_observed_failure_drives_candidate_when_current_baseline_is_lucky(
         assert result["observed_failure_case_ids"] == [case["id"]]
         assert result["baseline_metrics"]["failure_selected"]["ratio"] == 1
         assert result["best_metrics"]["failure_selected"]["ratio"] == 1
-        assert result["promotion_eligible"] is False
+        assert result["promotion_eligible"] is True
+        assert result["validation_basis"] == "historical_revision"
+        assert result["final_validation_metrics"]["failure_selected"]["ratio"] == 1
         assert analysis_calls == 1
         iteration = client.get(f"/api/optimizer/runs/{run['id']}/iterations").json()[0]
         assert iteration["diffs"][0]["failure_accuracy_before"]["ratio"] == 1
         assert iteration["candidate_version_id"]  # Candidate remains inspectable despite no proven gain.
-        assert iteration["accepted"] is False
+        assert iteration["accepted"] is True
         assert result["baseline_metrics"]["case_results"][0]["total"] == repeats
         bypass = client.post(f"/api/prompt-versions/{iteration['candidate_version_id']}/rollback", json={
             "expected_profile_revision": profile["revision"],
@@ -1319,6 +1361,89 @@ def test_repeated_mode_ignores_existing_cache_and_does_not_invent_failure(tmp_pa
         assert result["iteration_ids"] == []
         assert result["promotion_eligible"] is False
         assert "本次通过不代表长期稳定" in result["blocking_reasons"][0]
+
+
+@pytest.mark.parametrize("scenario", ["pass", "final_error", "regression_error", "stale", "no_history", "retry", "invalid_structure"])
+def test_historical_revision_is_validated_without_inventing_gain(tmp_path, monkeypatch, scenario):
+    candidate_calls = 0
+    field_id = None
+    store = run = None
+    count = 2 if scenario == "regression_error" else 1
+    regression_sample_id = None
+
+    async def model(connection, key, instructions, images, reference_text=""):
+        nonlocal candidate_calls
+        if "Datara 字段级提取提示词优化器" in instructions:
+            assert "而非同义改写" in instructions
+            assert "仅写只保留数字不足以修复" in instructions
+            return json.dumps({"analyses": [], "candidate_rules": [{
+                "field_id": field_id, "old_rule_hash": hashlib.sha256(b"").hexdigest(),
+                "new_rule": "定位购买方区域，排除送货公司与供应商，复核完整公司后缀；无法识别返回 null。",
+                "reason": "明确定位和排除条件，针对历史角色混淆错误。",
+            }]})
+        value = "Billing Entity Ltd."
+        if "复核完整公司后缀" in instructions:
+            candidate_calls += 1
+            if scenario == "final_error" and candidate_calls == 4:
+                value = "Wrong Entity"
+            if scenario == "regression_error" and images[0].parent.name == regression_sample_id:
+                value = "Wrong Entity"
+            if scenario == "retry" and candidate_calls <= 3:
+                value = "Wrong Entity"
+            if scenario == "stale" and candidate_calls == 4:
+                store.save(store.load(run["profile_id"]))
+        output = {"AI_Document": {"company_name": value}}
+        if scenario == "invalid_structure" and candidate_calls > 3:
+            output["AI_Document"]["unexpected_field"] = "not allowed"
+        return json.dumps(output)
+
+    monkeypatch.setattr("datara.optimizer.completion", model)
+    with TestClient(create_app(tmp_path)) as client:
+        run, baseline = make_speed_case(client, count=count, observed=scenario != "no_history")
+        store = client.app.state.store
+        field_id = run["selected_fields"][0]["field_id"]
+        if scenario == "regression_error":
+            run["run_test_cases"][1]["dataset_role"] = "regression"
+            regression_sample_id = run["run_test_cases"][1]["sample_id"]
+        run["settings"].update(evaluation_repeats=3, max_iterations=2 if scenario == "retry" else 1)
+        store.write_json(store.path("optimizer/runs", run["id"]), run)
+        asyncio.run(client.app.state.optimizer_service.run(run["id"]))
+        result = store.read_json("optimizer/runs", run["id"])
+        assert result["status"] == "completed", result
+        success = scenario in {"pass", "retry"}
+        assert result["promotion_eligible"] is success
+        assert result["baseline_metrics"]["failure_selected"]["ratio"] == 1
+        assert result["baseline_metrics"]["failure_selected"]["total"] == 3
+        if success:
+            assert result["validation_basis"] == "historical_revision"
+            assert result["final_validation_metrics"]["failure_selected"]["ratio"] == 1
+            assert result["result_summary"]["fixed"] == []
+            assert candidate_calls == (9 if scenario == "retry" else 6)
+            assert result["best_iteration_number"] == (2 if scenario == "retry" else 1)
+            response = client.post(f"/api/prompt-versions/{result['best_version_id']}/promote", json={
+                "expected_profile_revision": run["base_profile_revision"],
+                "expected_active_version_id": baseline["id"], "optimization_run_id": run["id"],
+            })
+            assert response.status_code == 200, response.text
+            assert response.json()["prompt_version"]["validation_basis"] == "historical_revision"
+            history = client.get(f"/api/profiles/{run['profile_id']}/prompt-versions").json()
+            assert history["versions"][0]["validation_basis"] == "historical_revision"
+        else:
+            assert result.get("validation_basis") is None
+            version = store.read_json("optimizer/prompt_versions", result["best_version_id"])
+            assert version["lifecycle"] != "validated"
+
+
+def test_historical_revision_requires_targeted_changes_and_determinate_checks():
+    from datara.optimizer import historical_revision_passes
+    observed = [{"field_id": "account", "selected": True, "matched": False}]
+    metrics = {"failure_selected": {"ratio": 1.0}}
+    assert historical_revision_passes(observed, {"account"}, metrics, [{"matched": True}])
+    assert not historical_revision_passes(observed, {"other"}, metrics, [{"matched": True}])
+    assert not historical_revision_passes(observed, {"account"}, metrics,
+                                           [{"matched": True, "indeterminate": True}])
+    assert not historical_revision_passes(observed, {"account"}, metrics, [])
+    assert not historical_revision_passes([], {"account"}, metrics, [{"matched": True}])
 
 
 def test_edit_historical_error_validates_clears_and_preserves_run_snapshot(tmp_path):

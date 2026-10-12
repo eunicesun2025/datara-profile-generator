@@ -79,6 +79,7 @@ def create_prompt_version(store: Store, profile: Profile, *, origin: str,
                           lifecycle: str = "candidate", selected_field_ids: list[str] | None = None,
                           run_id: str | None = None, iteration_id: str | None = None,
                           metrics: dict | None = None, make_active: bool = False,
+                          validation_basis: str | None = None,
                           rendered_prompt_override: str | None = None,
                           prompt_source: str = "generated",
                           imported_prompt_base: str | None = None,
@@ -100,6 +101,7 @@ def create_prompt_version(store: Store, profile: Profile, *, origin: str,
             "profile_snapshot": profile.model_dump(),
             "selected_field_ids": selected_field_ids or [], "optimization_run_id": run_id,
             "iteration_id": iteration_id, "metrics": metrics, "created_at": now(),
+            "validation_basis": validation_basis,
             "created_by": "optimizer" if origin == "optimizer_candidate" else "user",
         }
         _write(store, "optimizer/prompt_versions", identity, record)
@@ -195,7 +197,7 @@ def imported_prompt_field_rules(profile: Profile, prompt_text: str) -> dict[str,
     parenthesized = re.compile(rf"\(({token})\)")
     table_field = re.compile(rf"^\s*({token})\.({token})\s*$")
     leading_field = re.compile(
-        rf"^\s*(?:[-*•]\s*)?(?:\d+[.)、]\s*)?({token})\s*([:：])\s*(.*)$"
+        rf"^\s*(?:[-*•]\s*)?(?:\d+(?:\.\d+)*(?:[.)、]\s*|\s+))?({token})\s*([:：])\s*(.*)$"
     )
 
     for index, line in enumerate(lines):
@@ -214,7 +216,8 @@ def imported_prompt_field_rules(profile: Profile, prompt_text: str) -> dict[str,
         if name is not None:
             boundaries.append((index, name if name in known_names else None, inline))
         elif (line == line.strip() and
-              re.match(r"^(?:字段|提取.*(?:字段|行项目)|.*[（(]数组结构[）)])\s*[:：]$", line)):
+              (re.match(r"^(?:字段|提取.*(?:字段|行项目)|.*[（(]数组结构[）)])\s*[:：]$", line)
+               or re.match(r"^(?:\d+[.)、]\s*)?JSON\s*输出要求\s*[:：]?$", line, re.I))):
             # Top-level prose headings (for example "提取明细行项目（数组结构）：")
             # delimit the preceding field even when they do not name a Profile field.
             boundaries.append((index, None, ""))
@@ -230,7 +233,10 @@ def imported_prompt_field_rules(profile: Profile, prompt_text: str) -> dict[str,
         if marker_index is not None:
             marker_line = body[marker_index]
             marker_value = re.sub(r"^\s*识别规则\s*[:：]\s*", "", marker_line)
-            rule_lines = ([marker_value] if marker_value else []) + body[marker_index + 1:]
+            # Inline field instructions precede the detailed recognition section and
+            # must survive too (for example which MICR segment to extract).
+            prefix = ([inline] + body[:marker_index]) if inline else []
+            rule_lines = prefix + ([marker_value] if marker_value else []) + body[marker_index + 1:]
         else:
             rule_lines = ([inline] if inline else []) + body
         rule = "\n".join(rule_lines).strip()
@@ -602,6 +608,22 @@ def better_version(candidate: dict, best: dict, candidate_version: dict, best_ve
     return candidate_size < best_size
 
 
+def historical_revision_passes(observed_rows: list[dict], changed_ids: set[str],
+                               metrics: dict, evaluated_rows: list[dict]) -> bool:
+    """Allow a targeted revision with passing tests without claiming measured gain.
+
+    Historical evidence stays out of accuracy denominators. Every historically wrong
+    selected field must actually change, and every scored check must pass, including
+    unselected fields and regression cases. Indeterminate checks are not passes.
+    """
+    affected = {row["field_id"] for row in observed_rows
+                if row.get("selected") and not row["matched"] and not row.get("indeterminate")}
+    return bool(affected and affected <= changed_ids and evaluated_rows and
+                _metric_ratio(metrics, "failure_selected") == 1.0 and
+                all(row["matched"] and not row.get("indeterminate") and
+                    row.get("structure_valid", True) for row in evaluated_rows))
+
+
 def _field_score(rows: list[dict], field_id: str) -> dict:
     matches = [row for row in rows if row["field_id"] == field_id and not row.get("indeterminate")]
     count = sum(bool(row["matched"]) for row in matches)
@@ -794,6 +816,7 @@ class PromptOptimizerService:
                 evaluation["dataset_role"] = case["dataset_role"]
                 evaluation["repetition"] = repetition
                 evaluation["evidence_source"] = "model"
+                evaluation["structure_valid"] = not validation.get("errors")
             elapsed = int((datetime.now(timezone.utc) - started).total_seconds() * 1000)
             extraction = {
                 "schema_version": "1.0", "id": extraction_id, "run_id": run["id"],
@@ -914,6 +937,10 @@ class PromptOptimizerService:
             "完整原提示词会作为 USER REFERENCE DATA 一并提供。必须结合原提示词、字段 description、mismatch 和失败单据图片分析；extraction_rule 为空不代表原提示词没有相关规则。",
             "先判断字段的业务角色和页面区域，不得仅凭 company_name 等通用字段名把购买方误判为开票方。图片顺序见 diagnostic_images。",
             "根据 mismatch 判断根因，给出简洁、可泛化、不得包含样本答案的字段规则。old_rule_hash 必须原样复制。",
+            "目标是针对真实错误加强规则的精确性，而非同义改写或堆叠强调词。先区分可见证据与根因假设；证据不足时明确说是推测。",
+            "新规则应明确业务对象、定位区域、候选排除条件、歧义处理和输出约束，仅保留与该字段及错误有关的步骤；保留旧规则中有效的约束。",
+            "字符多位、少位或混淆错误必须在识别阶段解决：说明如何区分真实字符与分隔符、如何复核数字组边界。若符号已被误读为数字，仅写只保留数字不足以修复。不得凭样本推断固定长度或擅自增删字符。",
+            "本次基线重跑正确不否定历史错误。仍须针对历史错误给出具体防错规则，但不得宣称已经证明准确率提升；不得写入本张单据答案或要求输出额外调试字段。",
             "evidence_source=observed_failure 是用户提供的历史错误，只用于分析，不代表本次重跑失败或错误频率。不得把它与实测结果混为一谈。",
             "new_rule、root_cause、suggested_change 和 reason 必须沿用 original_prompt_language；中文原提示词必须输出中文规则，英文原提示词必须输出英文规则。标签原文和字段名可以保留其原始语言。",
             "输出结构：" + json.dumps(schema, ensure_ascii=False),
@@ -1137,8 +1164,20 @@ class PromptOptimizerService:
                     diff["regression_accuracy_before"] = _field_score(previous_regression, field_id)
                     diff["regression_accuracy_after"] = _field_score(regression_rows, field_id)
                 accepted, reasons = decide_candidate(baseline_metrics, best_metrics, metrics, run["settings"])
+                basis = "measured_improvement" if accepted else None
+                # A full-score baseline cannot be beaten numerically. Keep the first
+                # targeted revision that passes, without preferring shorter wording.
+                historical_ok = (
+                    not accepted and best["id"] == baseline["id"] and
+                    _metric_ratio(baseline_metrics, "failure_selected") == 1.0 and
+                    historical_revision_passes(observed_failure, {d["field_id"] for d in diffs},
+                                               metrics, failure_rows + regression_rows))
+                if historical_ok:
+                    accepted, basis = True, "historical_revision"
+                    reasons = ["针对历史错误的规则修订已通过本轮测试；新旧实测持平，尚未证明准确率提升，需最终复验。"]
                 iteration.update(status="accepted" if accepted else "rejected", metrics=metrics,
-                                 accepted=accepted, decision_reasons=reasons, finished_at=now())
+                                 accepted=accepted, validation_basis=basis,
+                                 decision_reasons=reasons, finished_at=now())
                 _write(self.store, "optimizer/iterations", iteration_id, iteration)
                 logger.info(
                     "optimizer_iteration_completed run_id=%s iteration=%d status=%s "
@@ -1149,16 +1188,18 @@ class PromptOptimizerService:
                 attempts.append({"candidate_rule_hashes": [f["rule_hash"] for f in candidate["field_rules"]
                                                             if f["field_id"] in {x["field_id"] for x in run["selected_fields"]}],
                                  "accepted": accepted, "reasons": reasons})
-                if accepted and better_version(metrics, best_metrics, candidate, best):
+                if accepted and (historical_ok or better_version(metrics, best_metrics, candidate, best)):
                     best, best_metrics = candidate, metrics
                     best_evaluations = failure_rows + regression_rows
-                    run.update(best_version_id=best["id"], best_iteration_number=number, best_metrics=metrics)
+                    run.update(best_version_id=best["id"], best_iteration_number=number,
+                               best_metrics=metrics, candidate_basis=basis)
                     no_improvement = 0
                 else:
                     no_improvement += 1
                 self._save_run(run)
                 if run["settings"]["early_stop_enabled"]:
-                    if _metric_ratio(best_metrics, "failure_selected") >= run["settings"]["target_accuracy"]:
+                    if (best["id"] != baseline["id"] and
+                            _metric_ratio(best_metrics, "failure_selected") >= run["settings"]["target_accuracy"]):
                         stop_reason = "target_accuracy"
                         break
                     if no_improvement >= run["settings"]["no_improvement_limit"]:
@@ -1167,7 +1208,7 @@ class PromptOptimizerService:
             run["stop_reason"] = stop_reason
             if best["id"] == baseline["id"]:
                 run.update(status="completed", promotion_eligible=False,
-                           blocking_reasons=["未证明候选比原版更好；候选已保留供查看，不能发布。可增加重复次数或补充代表性案例。"], finished_at=now())
+                           blocking_reasons=["候选未满足实测提升或历史错误修订的复测条件；请查看各轮具体原因。"], finished_at=now())
                 self._save_run(run)
                 logger.info(
                     "optimizer_run_completed run_id=%s stop_reason=%s best_iteration=none "
@@ -1182,6 +1223,18 @@ class PromptOptimizerService:
             run["final_validation_metrics"] = final_metrics
             final_ok, final_reasons = decide_candidate(baseline_metrics, baseline_metrics, final_metrics,
                                                        run["settings"])
+            validation_basis = "measured_improvement" if final_ok else None
+            if not final_ok and run.get("candidate_basis") == "historical_revision":
+                original_rules = {f["field_id"]: f["extraction_rule"] for f in baseline["field_rules"]}
+                changed_ids = {f["field_id"] for f in best["field_rules"]
+                               if f["extraction_rule"] != original_rules.get(f["field_id"])}
+                final_ok = historical_revision_passes(
+                    observed_failure, changed_ids, final_metrics, final_failure + final_regression)
+                if final_ok:
+                    validation_basis = "historical_revision"
+                    final_reasons = []
+                else:
+                    final_reasons = ["历史错误修订未通过最终复验：存在错误或无法判定的结果，暂不可发布。"]
             current = self.store.load(run["profile_id"])
             stale = current.revision != run["base_profile_revision"] or fingerprint(current) != run["base_profile_fingerprint"]
             if stale:
@@ -1206,10 +1259,12 @@ class PromptOptimizerService:
                               for row in regressed],
             }
             run.update(status="completed", promotion_eligible=final_ok and not stale,
+                       validation_basis=validation_basis if final_ok and not stale else None,
                        blocking_reasons=[] if final_ok and not stale else final_reasons, finished_at=now())
             if final_ok and not stale:
                 best["lifecycle"] = "validated"
                 best["metrics"] = final_metrics
+                best["validation_basis"] = validation_basis
                 _write(self.store, "optimizer/prompt_versions", best["id"], best)
             self._save_run(run)
             logger.info(
@@ -1274,6 +1329,7 @@ def promote_version(store: Store, version_id: str, expected_revision: int,
         promoted = create_prompt_version(store, saved, origin="promotion", parent_version_id=version_id,
                                          lifecycle="active", selected_field_ids=version["selected_field_ids"],
                                          run_id=run_id, metrics=version.get("metrics"), make_active=True,
+                                         validation_basis=version.get("validation_basis"),
                                          **version_options)
         return saved, promoted
 

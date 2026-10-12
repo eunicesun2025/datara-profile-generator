@@ -127,7 +127,7 @@ def register_optimizer_routes(app: FastAPI, store: Store, tasks: dict):
             {k: v.get(k) for k in ("id", "version_number", "parent_version_id", "origin", "lifecycle",
                                     "profile_revision", "prompt_hash", "prompt_source", "prompt_language",
                                     "selected_field_ids",
-                                    "optimization_run_id", "iteration_id", "metrics", "created_at")}
+                                    "optimization_run_id", "iteration_id", "metrics", "created_at", "validation_basis")}
             for v in versions
         ]}
 
