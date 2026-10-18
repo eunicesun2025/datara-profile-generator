@@ -44,6 +44,14 @@ class TableDef(Model):
     fields: list[FieldDef] = Field(default_factory=list, max_length=200)
 
 
+class ExtractionGroup(Model):
+    id: str = Field(default_factory=uid)
+    name: str = Field(min_length=1, max_length=120)
+    field_ids: list[str] = Field(min_length=2, max_length=20)
+    extraction: str = Field(min_length=1, max_length=12000)
+    source_text: str = Field(default="", max_length=12000)
+
+
 class Profile(Model):
     id: str = Field(default_factory=uid)
     schema_version: Literal["1.0"] = "1.0"
@@ -53,6 +61,7 @@ class Profile(Model):
     accepted_documents: str = Field(default="", max_length=2000)
     rejected_documents: str = Field(default="", max_length=2000)
     document_rules: str = Field(default="", max_length=5000)
+    extraction_groups: list[ExtractionGroup] = Field(default_factory=list, max_length=20)
     database_name: str = Field(default="", max_length=128)
     database_schema: str = Field(default="dbo", max_length=128)
     tables: list[TableDef] = Field(default_factory=list, max_length=20)
@@ -195,6 +204,23 @@ def ai_tables(p: Profile):
 
 def validate_profile(p: Profile) -> dict:
     errors, warnings = [], []
+    group_ids, members = set(), set()
+    ai_fields = {f.id: t.id for t in p.tables for f in t.fields if f.source == "AI"}
+    for group in p.extraction_groups:
+        if group.id in group_ids or len(set(group.field_ids)) != len(group.field_ids):
+            errors.append("联合规则组或成员 ID 重复")
+        group_ids.add(group.id)
+        if any(i not in ai_fields for i in group.field_ids):
+            errors.append("联合规则只能关联已有 AI 字段")
+        if len({ai_fields.get(i) for i in group.field_ids}) != 1:
+            errors.append("联合规则的字段必须属于同一张表")
+        if members.intersection(group.field_ids):
+            errors.append("同一字段只能属于一个联合规则组")
+        members.update(group.field_ids)
+    for table in p.tables:
+        for field in table.fields:
+            if field.id in members and field.extraction.strip():
+                errors.append(f"{field.name}：已属于联合规则，请在提示词优化中编辑完整联合段落，不要另设单字段规则")
     heads = [t for t in p.tables if t.role == "head"]
     if len(heads) != 1:
         errors.append("必须有且只有一张主表")

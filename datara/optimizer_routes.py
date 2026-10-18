@@ -134,14 +134,14 @@ def register_optimizer_routes(app: FastAPI, store: Store, tasks: dict):
     @app.post("/api/profiles/{profile_id}/prompt-versions/import")
     def import_existing_prompt(profile_id: str, body: PromptImportRequest):
         profile = store.load(profile_id)
-        version = import_prompt_version(store, profile, body.prompt_text, body.expected_profile_revision)
+        version = import_prompt_version(store, profile, body.prompt_text, body.expected_profile_revision, body.extraction_groups)
         response = {k: version.get(k) for k in (
             "id", "version_number", "origin", "lifecycle", "prompt_source", "profile_revision",
             "prompt_language", "prompt_hash", "created_at",
         )}
         response.update({k: version.get(k) for k in (
             "profile", "mapped_field_ids", "updated_field_ids", "unmapped_field_ids",
-            "rejected_field_ids",
+            "rejected_field_ids", "grouped_field_ids",
         )})
         return response
 
@@ -151,8 +151,12 @@ def register_optimizer_routes(app: FastAPI, store: Store, tasks: dict):
         after = store.read_json("optimizer/prompt_versions", to_id)
         if before["profile_id"] != after["profile_id"]:
             raise ValueError("只能比较同一 Profile 的提示词版本")
-        left = {f["field_id"]: f for f in before["field_rules"]}
-        right = {f["field_id"]: f for f in after["field_rules"]}
+        def comparison_rules(version):
+            return version["field_rules"] + [
+                {"field_id": "group:" + g["id"], "table_name": "联合规则", "field_name": g["name"],
+                 "extraction_rule": g["extraction"]} for g in version.get("group_rules", [])]
+        left = {f["field_id"]: f for f in comparison_rules(before)}
+        right = {f["field_id"]: f for f in comparison_rules(after)}
         diffs = []
         for identity in left.keys() | right.keys():
             old, new = left.get(identity), right.get(identity)

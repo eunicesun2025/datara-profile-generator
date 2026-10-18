@@ -190,3 +190,29 @@ def summarize_metrics(failure_evaluations: list[dict], regression_evaluations: l
         "regression_selected": accuracy(regression_evaluations, selected_only=True),
         "regression_all": accuracy(regression_evaluations),
     }
+
+
+def grouped_metrics(failure_rows: list[dict], regression_rows: list[dict], groups: list[dict]) -> dict:
+    """A group passes only if every member on every scored row passes in that trial."""
+    def trials(rows, group):
+        buckets = {}
+        for row in rows:
+            if row["field_id"] in group["field_ids"]:
+                buckets.setdefault((row["test_case_id"], row.get("repetition", 1)), []).append(row)
+        checks = []
+        for trial in buckets.values():
+            row_ids = {r.get("row_index") for r in trial}
+            complete = all({r["field_id"] for r in trial if r.get("row_index") == index}
+                           == set(group["field_ids"]) for index in row_ids)
+            checks.append({"selected": True, "matched": complete and all(
+                r["matched"] and not r.get("indeterminate") and r.get("structure_valid", True)
+                for r in trial)})
+        return checks
+
+    members = {i for g in groups for i in g["field_ids"]}
+    targets = [r for r in failure_rows if r["selected"] and r["field_id"] not in members]
+    for group in groups:
+        targets.extend(trials(failure_rows, group))
+    return {"failure_targets": accuracy(targets),
+            "failure_groups": {g["id"]: accuracy(trials(failure_rows, g)) for g in groups},
+            "regression_groups": {g["id"]: accuracy(trials(regression_rows, g)) for g in groups}}

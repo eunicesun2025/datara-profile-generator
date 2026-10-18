@@ -407,3 +407,17 @@ main{padding:25px 18px}
 .optimizer-baseline-content{grid-template-columns:38px 1fr}.optimizer-baseline-actions{grid-column:1/-1;justify-content:flex-start}.optimizer-case-dialog{grid-template-columns:1fr}.optimizer-case-preview img{max-height:330px}
 }
 @media(max-width:560px){.optimizer-kpis,.optimizer-setting-grid{grid-template-columns:1fr}.optimizer-field-grid{max-height:none}.optimizer-panel-head{align-items:flex-start}.optimizer-panel-head>button{width:100%;margin-top:7px}.optimizer-case-meta{align-items:flex-start;flex-direction:column}.optimizer-hero{padding:24px 20px}.optimizer-hero h2{font-size:21px}}
+
+/* Keep joint-rule naming visible beside the imported prompt. */
+dialog.prompt-binding-dialog{width:min(1180px,95vw)}
+.prompt-binding-dialog #modal-body{display:flex;flex-direction:column;max-height:88vh}
+.prompt-binding-dialog .modal-content{min-height:0;max-height:none;overflow:auto}
+.prompt-binding-layout{display:grid;grid-template-columns:minmax(0,1.2fr) minmax(0,1fr);gap:24px;align-items:start}
+.prompt-binding-layout .optimizer-prompt-textarea{height:38vh;min-height:180px}
+.prompt-binding-panel{min-width:0;padding:16px;background:#f3f7fc;border:1px solid var(--line);border-radius:8px}
+.prompt-binding-panel>.form-label{display:block;margin:12px 0 6px}
+.prompt-binding-fields{display:flex;flex-direction:column;gap:9px;max-height:160px;overflow:auto;margin:8px 0 14px}
+.prompt-binding-fields label{display:flex;align-items:flex-start;gap:7px;overflow-wrap:anywhere}
+.prompt-binding-fields input{flex-shrink:0}
+.prompt-binding-dialog .modal-head,.prompt-binding-dialog .modal-footer{flex-shrink:0}
+@media(max-width:700px){.prompt-binding-layout{grid-template-columns:1fr}.prompt-binding-panel{grid-row:1}.prompt-binding-layout .optimizer-prompt-textarea{height:240px}}

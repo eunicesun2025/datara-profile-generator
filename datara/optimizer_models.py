@@ -4,7 +4,7 @@ from typing import Any, Literal
 
 from pydantic import Field, model_validator
 
-from .domain import Model
+from .domain import Model, ExtractionGroup
 
 
 class ComparisonPolicy(Model):
@@ -50,6 +50,7 @@ class GroundTruthCreate(Model):
 class PromptImportRequest(Model):
     expected_profile_revision: int = Field(ge=1)
     prompt_text: str = Field(min_length=20, max_length=100_000)
+    extraction_groups: list[ExtractionGroup] = Field(default_factory=list, max_length=20)
 
 
 class OptimizationRunCreate(Model):
@@ -101,12 +102,25 @@ class CandidateRule(Model):
     reason: str = Field(max_length=2000)
 
 
+class CandidateGroupRule(Model):
+    group_id: str
+    old_rule_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+    new_rule: str = Field(min_length=1, max_length=12000)
+    reason: str = Field(max_length=2000)
+
+
 class CandidateResponse(Model):
     analyses: list[CandidateAnalysis] = Field(default_factory=list, max_length=20)
-    candidate_rules: list[CandidateRule] = Field(min_length=1, max_length=20)
+    candidate_rules: list[CandidateRule] = Field(default_factory=list, max_length=20)
+    candidate_group_rules: list[CandidateGroupRule] = Field(default_factory=list, max_length=20)
 
     @model_validator(mode="after")
     def unique_rules(self):
+        if not self.candidate_rules and not self.candidate_group_rules:
+            raise ValueError("至少提供一个字段或联合规则候选")
+        group_ids = [r.group_id for r in self.candidate_group_rules]
+        if len(group_ids) != len(set(group_ids)):
+            raise ValueError("candidate_group_rules contains duplicate group IDs")
         ids = [rule.field_id for rule in self.candidate_rules]
         if len(ids) != len(set(ids)):
             raise ValueError("candidate_rules contains duplicate field IDs")

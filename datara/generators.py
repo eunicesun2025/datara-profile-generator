@@ -81,8 +81,11 @@ def prompt(p: Profile) -> str:
             sections.append("  类型处理：" + type_rules[f.data_type])
             if f.is_required:
                 sections.append("  业务必填：优先核对；证据不足仍返回 null，交由人工补充。")
-            if f.extraction.strip():
+            if f.extraction.strip() and not any(f.id in g.field_ids for g in p.extraction_groups):
                 sections.append("  识别规则：" + f.extraction.strip())
+    for group in p.extraction_groups:
+        names = [f.name for t in p.tables for f in t.fields if f.id in group.field_ids]
+        sections.extend(["\n联合提取：" + group.name + "（" + ", ".join(names) + "）", group.extraction])
     if p.document_rules.strip():
         sections += ["\n四、单据与明细识别规则", p.document_rules.strip()]
     sections += ["\n五、统一输出要求（优先于与之冲突的业务说明）",
@@ -132,7 +135,24 @@ def prompt_components(p: Profile) -> dict:
         "json_structure_hash": text_hash(json.dumps(structure, ensure_ascii=False, sort_keys=True)),
         "field_sequence_hash": text_hash(json.dumps(sequence, ensure_ascii=False)),
         "field_rules": fields,
+        "group_rules": [{**g.model_dump(), "rule_hash": text_hash(g.extraction)} for g in p.extraction_groups],
     }
+
+
+def render_bound_groups(base: str, profile: Profile) -> str:
+    """Replace literal, non-overlapping original spans, never append group overrides."""
+    spans = []
+    for group in profile.extraction_groups:
+        if not group.source_text or base.count(group.source_text) != 1:
+            raise ValueError(f"联合规则「{group.name}」必须唯一对应原提示词中的一段原文，请重新绑定")
+        start = base.index(group.source_text)
+        spans.append((start, start + len(group.source_text), group.extraction))
+    spans.sort()
+    if any(a[1] > b[0] for a, b in zip(spans, spans[1:])):
+        raise ValueError("联合规则的原文范围不能重叠")
+    for start, end, replacement in reversed(spans):
+        base = base[:start] + replacement + base[end:]
+    return base
 
 
 def profile_with_field_rules(p: Profile, rules: dict[str, str]) -> Profile:
