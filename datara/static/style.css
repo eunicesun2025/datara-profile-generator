@@ -421,3 +421,17 @@ dialog.prompt-binding-dialog{width:min(1180px,95vw)}
 .prompt-binding-fields input{flex-shrink:0}
 .prompt-binding-dialog .modal-head,.prompt-binding-dialog .modal-footer{flex-shrink:0}
 @media(max-width:700px){.prompt-binding-layout{grid-template-columns:1fr}.prompt-binding-panel{grid-row:1}.prompt-binding-layout .optimizer-prompt-textarea{height:240px}}
+
+/* Multi-row optimizer case entry. */
+.case-row-editor section{margin:14px 0;padding:12px;border:1px solid var(--line);border-radius:8px;min-width:0}
+.case-row-scroll{overflow-x:auto;margin:10px 0;max-width:100%}
+.case-row-editor table{width:100%;border-collapse:collapse}
+.case-row-editor th,.case-row-editor td{padding:8px;text-align:left;vertical-align:top}
+.case-row-editor td>input{min-width:130px;width:100%;padding:8px 10px;border:1px solid var(--line);border-radius:6px;font:inherit;background:white}
+.case-row-editor td>input:disabled{background:#f3f5f8;color:#667085}
+.case-row-editor td>input:invalid{border-color:#c33}
+.case-row-editor td label{display:flex;align-items:center;gap:5px;margin-top:6px;font-size:12px}
+.case-row-editor td label input{width:auto}
+.case-row-editor td small{display:block}
+.case-row-editor+details{margin:12px 0}
+.optimizer-case-dialog>div{min-width:0}
